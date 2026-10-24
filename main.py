@@ -273,6 +273,25 @@ def ocr_status():
             "fps": OCR.OCR_FPS, "budget": OCR.OCR_BUDGET}
 
 
+@app.get("/ocr-test")
+def ocr_test(name: str = "approval.mp4"):
+    import time, traceback
+    p = Path("demo_audio") / Path(name).name
+    if not p.exists():
+        return {"error": "file not found", "looked_for": str(p)}
+    out = {"file": str(p), "has_video": OCR.has_video(p)}
+    t = time.time()
+    try:
+        with __import__("tempfile").TemporaryDirectory() as d:
+            fr = OCR._frames(p, d, 30)
+            out["frames_extracted"] = len(fr)
+            out["first_frame_text"] = OCR._ocr_one(fr[0][1]) if fr else None
+    except Exception:
+        out["exception"] = traceback.format_exc()[-1500:]
+    out["secs"] = round(time.time() - t, 1)
+    return out
+
+
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
     u = me(request)
