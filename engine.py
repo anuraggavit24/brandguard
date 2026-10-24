@@ -70,6 +70,16 @@ MODS = _n({
     "paune": -0.25, "pavne": -0.25, "paun": -0.25, "पौने": -0.25, "पावणे": -0.25,
 })
 
+# tens and common two-digit words: "thirty", "tees", "तीस", "pachees"
+TENS = _n({
+    "ten": 10, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+    "bees": 20, "tees": 30, "chalis": 40, "pachas": 50, "saath": 60, "sattar": 70, "assi": 80, "nabbe": 90,
+    "pachees": 25, "pachchis": 25, "pachhattar": 75,
+    "बीस": 20, "तीस": 30, "चालीस": 40, "चाळीस": 40, "पचास": 50, "पन्नास": 50, "साठ": 60, "सत्तर": 70, "ऐंशी": 80,
+    "नव्वद": 90, "पंचवीस": 25, "पंचाहत्तर": 75, "पचहत्तर": 75, "वीस": 20,
+})
+FILLERS = _n({"and": 0, "aur": 0, "और": 0, "आणि": 0, "ani": 0, "plus": 0})
+
 POINT = {norm(x).lower() for x in ["point", "पॉइंट", "पॉईंट", "दशमलव"]}
 NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?91)?([6-9]\d{9})(?!\d)")
@@ -103,6 +113,10 @@ def parse_quantity(toks):
     if (len(toks) >= 3 and toks[-2] in POINT                    # one point three
             and last in NUMWORDS and toks[-3] in NUMWORDS):
         return NUMWORDS[toks[-3]] + NUMWORDS[last] / 10
+    if last in TENS:                                            # tees, thirty
+        return float(TENS[last])
+    if last in NUMWORDS and len(toks) >= 2 and toks[-2] in TENS and TENS[toks[-2]] >= 20:   # thirty five
+        return float(TENS[toks[-2]] + NUMWORDS[last])
     if last in FIXED:                                           # dedh, dhai, sava
         return FIXED[last]
     for key, delta in MODS.items():                             # साडेतीन (joined)
@@ -123,13 +137,24 @@ def extract_prices(text):
         mult = UNITS.get(tok)
         if mult is None:
             continue
-        q = parse_quantity(toks[max(0, i - 4):i])
+        window = [t for t in toks[max(0, i - 5):i] if t not in FILLERS][-4:]
+        q = parse_quantity(window)
         if q is None or q <= 0:
             continue
-        found.append({
-            "value": round(q * mult),
-            "spoken": " ".join(toks[max(0, i - 3):i + 1]),
-        })
+        item = {"value": round(q * mult), "spoken": " ".join(toks[max(0, i - 3):i + 1]), "_i": i, "_m": mult}
+        prev = found[-1] if found else None
+        # "1 crore 30 lakh" is one amount (1.30 crore), not two
+        if (prev and prev["_m"] == CRORE and mult == LAKH and i - prev["_i"] <= 5
+                and item["value"] < CRORE):
+            prev["value"] += item["value"]
+            prev["spoken"] = prev["spoken"] + " " + " ".join(toks[prev["_i"] + 1:i + 1])
+            prev["_m"] = LAKH
+            prev["_i"] = i
+            continue
+        found.append(item)
+    for f in found:
+        f.pop("_i", None)
+        f.pop("_m", None)
     return found
 
 
@@ -315,6 +340,10 @@ def selftest():
         ("१.३ कोटी", 13_000_000),
         ("dedh crore", 15_000_000),
         ("1.3 lakh", 130_000),
+        ("1 crore 30 lakh", 13_000_000),
+        ("ek crore tees lakh", 13_000_000),
+        ("एक कोटी तीस लाख", 13_000_000),
+        ("1 crore thirty five lakh", 13_500_000),
     ]
     for text, expected in cases:
         got = [p["value"] for p in extract_prices(text)]
