@@ -65,16 +65,16 @@ NAV_ADMIN = [
     ("approvals", "/approvals", "Approval Records", "badge-check"),
     ("audit", "/audit", "Audit Trail", "history"),
     ("verify", "/verify", "Verify a File", "file-check"),
-    ("testaudio", "/test-audio", "Test Audio", "play"),
+    ("testaudio", "/test-audio", "Demo Files", "play"),
 ]
 NAV_SUB = [
     ("overview", "/", "My Dashboard", "home"),
-    ("submit", "/submit", "Submit a Reel", "upload"),
+    ("submit", "/submit", "Submit a Video", "upload"),
     ("reviews", "/reviews", "My Submissions", "folder"),
     ("disputes", "/disputes", "Disputes", "scale"),
     ("verify", "/verify", "Verify a File", "file-check"),
     ("help", "/help", "Help and Guidelines", "help"),
-    ("testaudio", "/test-audio", "Test Audio", "play"),
+    ("testaudio", "/test-audio", "Demo Files", "play"),
 ]
 
 # ------------------------------------------------------------------- statuses

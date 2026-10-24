@@ -42,7 +42,7 @@ MAX_SECONDS = 180
 THRESHOLD = 0.65
 ALLOWED = {".mp4", ".mov", ".mkv", ".webm", ".m4a", ".mp3", ".wav", ".aac", ".ogg"}
 LINK_HOSTS = ("youtube.com", "youtu.be", "instagram.com", "facebook.com", "fb.watch")
-DEMO = {"admin": 1, "partner": 2, "freelancer": 3}
+DEMO = {"admin": 1, "partner": 2, "fvideoancer": 3}
 ROLE_LABEL = {"admin": "Builder / Brand Manager", "submitter": "Creator / Partner"}
 
 # comparative and urgency claims that need supporting evidence
@@ -130,7 +130,7 @@ def init_db():
         con.execute("INSERT INTO brands VALUES (2, ?, ?)", ("Sample Builders", json.dumps(REG2, ensure_ascii=False)))
         con.execute("INSERT INTO users VALUES (1, 'Builder Admin', 'admin@demo.test', 'admin', 1)")
         con.execute("INSERT INTO users VALUES (2, 'Rahul Realty (Channel Partner)', 'partner@demo.test', 'submitter', NULL)")
-        con.execute("INSERT INTO users VALUES (3, 'Priya Freelance (Freelancer)', 'freelancer@demo.test', 'submitter', NULL)")
+        con.execute("INSERT INTO users VALUES (3, 'Priya Fvideoance (Fvideoancer)', 'fvideoancer@demo.test', 'submitter', NULL)")
         con.execute("INSERT INTO memberships VALUES (2, 1)")
         con.execute("INSERT INTO memberships VALUES (3, 1)")
         con.execute("INSERT INTO memberships VALUES (3, 2)")
@@ -207,7 +207,7 @@ def page(title, body, user=None, active="", crumbs=None, request=None):
         queue_n = q("SELECT COUNT(*) AS c FROM submissions WHERE brand_id=? AND status IN ('SUPERVISION','DISPUTED')",
                     (user["brand_id"],))[0]["c"]
     demo = [(k, lbl, DEMO[k] == user["id"]) for k, lbl in
-            (("admin", "Builder"), ("partner", "Channel Partner"), ("freelancer", "Freelancer"))]
+            (("admin", "Builder"), ("partner", "Channel Partner"), ("fvideoancer", "Fvideoancer"))]
     return HTMLResponse(ui.shell(title, body, user, ROLE_LABEL[user["role"]], active, crumbs,
                                  queue_n, company, flash, demo))
 
@@ -300,8 +300,8 @@ def home(request: Request):
             return (f'<div class="card role-card"><span class="ic-lg">{ui.icon(ic, 22)}</span><h2>{title}</h2>'
                     f'<p class="muted">{text}</p><a class="btn" href="/enter/{key}">{btn}{ui.icon("arrow-right", 16)}</a></div>')
         body = f"""
-        <div style="margin-bottom:28px"><h1>Review reels before they go live</h1>
-        <p class="page-desc">BrandGuard listens to a marketing reel in Marathi, Hindi or English, checks every price
+        <div style="margin-bottom:28px"><h1>Review videos before they go live</h1>
+        <p class="page-desc">BrandGuard listens to a marketing video in Marathi, Hindi or English, checks every price
         and claim against the brand's approved facts, and sends anything uncertain to a person. Nothing is approved
         without a recorded decision.</p></div>
         <p class="sec-title">Choose a demo role to enter</p>
@@ -310,11 +310,11 @@ def home(request: Request):
                 "Set brand rules and approved facts, review flagged and disputed items, then approve or reject.",
                 "Enter as Builder")}
           {role("partner", "upload", "Channel Partner",
-                "Submit a reel or paste a link for one company and see the result.", "Enter as Partner")}
-          {role("freelancer", "building", "Freelancer",
-                "Works with two companies under one login and switches between them.", "Enter as Freelancer")}
+                "Submit a video or paste a link for one company and see the result.", "Enter as Partner")}
+          {role("fvideoancer", "building", "Fvideoancer",
+                "Works with two companies under one login and switches between them.", "Enter as Fvideoancer")}
         </div>
-        <p style="margin-top:20px"><a class="btn secondary" href="/test-audio">Judges: download test audio</a></p>
+        <p style="margin-top:20px"><a class="btn secondary" href="/test-audio">Judges: demo files to download</a></p>
         <p class="muted" style="margin-top:12px">This is a demo. No sign-up is needed and the roles are not real accounts.</p>"""
         return page("Welcome", body)
     return admin_dash(request, u) if u["role"] == "admin" else submitter_dash(request, u)
@@ -359,7 +359,7 @@ def submitter_dash(request, u):
 
     welcome = f"""<section class="card welcome" aria-labelledby="wl"><div class="card-head"><h2 id="wl">Welcome, {e(first)}</h2>
       <button type="button" class="btn secondary sm" data-dismiss="creator">Dismiss</button></div>
-      <p>Submit a reel and BrandGuard checks it against {e(cname)}'s approved prices and rules before it is published.
+      <p>Submit a video and BrandGuard checks it against {e(cname)}'s approved prices and rules before it is published.
       Uncertain cases are sent to a person, so you always get a clear answer.</p>
       <ol class="steps"><li>Submit content</li><li>Analyze content</li><li>Review findings</li><li>Resolve issues</li><li>Receive a decision</li></ol></section>"""
     attn = ""
@@ -369,8 +369,8 @@ def submitter_dash(request, u):
                         "warn", "Needs your attention.")
     scope = (f'<p class="muted">Showing activity for <b>{e(cname)}</b>. Use the company switcher at the top to change.</p>'
              if multi else "")
-    body = (ui.page_header("My Dashboard", f"Your reel submissions for {e(cname)}.",
-                           f'<a class="btn" href="/submit">{ui.icon("upload", 16)}Submit a Reel</a>')
+    body = (ui.page_header("My Dashboard", f"Your video submissions for {e(cname)}.",
+                           f'<a class="btn" href="/submit">{ui.icon("upload", 16)}Submit a Video</a>')
             + '<div class="stack">' + welcome + attn + scope
             + '<div class="stats">'
             + ui.stat("Submissions", len(mine), "", "/reviews")
@@ -380,8 +380,8 @@ def submitter_dash(request, u):
             + '</div>'
             + ui.card("Recent submissions",
                       sub_table(mine[:5], show_user=False, label="Recent submissions") if mine else
-                      ui.empty("No submissions yet", f"Submit your first reel for {e(cname)} to get started.",
-                               '<a class="btn" href="/submit">Submit a Reel</a>'),
+                      ui.empty("No submissions yet", f"Submit your first video for {e(cname)} to get started.",
+                               '<a class="btn" href="/submit">Submit a Video</a>'),
                       actions='<a href="/reviews">View all</a>' if len(mine) > 5 else "")
             + '</div>')
     return page("My Dashboard", body, u, "overview", [], request)
@@ -408,7 +408,7 @@ def submit_form(request: Request):
                f'you want to be explicit. You can only pick projects you have been given access to'
                f'{"" if projs else ". You have none for this company yet, so ask the company to grant access"}.</p>')
     lang = (f'<label for="language">Spoken language</label><select id="language" name="language">{langs}</select>'
-            '<p class="hint">Choose the language spoken in the reel. If unsure, pick Auto-detect.</p>')
+            '<p class="hint">Choose the language spoken in the video. If unsure, pick Auto-detect.</p>')
     exts = ",".join(sorted(ALLOWED))
     file_form = f"""
     <form method="post" action="/upload" enctype="multipart/form-data" data-lock>
@@ -423,16 +423,16 @@ def submit_form(request: Request):
         <button type="button" class="btn secondary sm" id="remove-file">Remove</button></div>
       <p class="req" id="file-err" role="alert" hidden></p>
       {company}{lang}
-      <p data-busy hidden class="muted" role="status">Reviewing. This can take 10 to 40 seconds. Please keep this page open.</p>
+      <p data-busy hidden class="muted" role="status">Reviewing. On this free server it can take a few minutes. Please keep this page open.</p>
       <button id="submit-file" class="btn" type="submit" data-busy-label="Reviewing...">Submit for Compliance Review</button>
     </form>"""
     if LINKS_ENABLED:
         link_form = f"""
     {ui.alert("Link submission is supported on a laptop or desktop. On a phone, download the video and upload the file instead.", "info")}
     <form method="post" action="/upload_link" data-lock style="margin-top:16px">
-      <label for="url">Link to a public reel</label>
+      <label for="url">Link to a public video</label>
       <input id="url" type="url" name="url" required placeholder="https://www.youtube.com/shorts/..." aria-describedby="url-h">
-      <p class="hint" id="url-h">YouTube Shorts, Instagram reels and Facebook reels. Both the audio and the post's title and
+      <p class="hint" id="url-h">YouTube Shorts, Instagram videos and Facebook videos. Both the audio and the post's title and
       description are reviewed. Private posts cannot be fetched.</p>
       {company}{lang}
       <p data-busy hidden class="muted" role="status">Fetching and reviewing. This can take up to a minute. Please keep this page open.</p>
@@ -441,11 +441,12 @@ def submit_form(request: Request):
     else:
         link_form = ui.alert(
             "Link checking is switched off on this hosted demo, because YouTube, Instagram and Facebook block automated "
-            "downloads from shared cloud servers. It works in the local build on a laptop or desktop. To check a posted reel "
+            "downloads from shared cloud servers. It works in the local build on a laptop or desktop. To check a posted video "
             "here, download it and use <b>Upload a file</b>.", "warn", "Links are unavailable here.")
-    body = (ui.page_header("Submit a Reel for Review",
-                           "BrandGuard listens to the reel, checks every price and claim against the brand's approved facts "
+    body = (ui.page_header("Submit a Video for Review",
+                           "BrandGuard listens to the video, checks every price and claim against the brand's approved facts "
                            "and shows you the result. Anything uncertain goes to a person for a decision.")
+            + ui.alert("This demo runs on a free Render server with very little CPU and memory. To review a video, BrandGuard turns the speech into text and then reads every frame of the video, so it can take a few minutes. The first request after a quiet period is slower still, because the server has to wake up. Please keep this page open until the result appears. On a normal server the same review takes seconds. Short videos (under 15 seconds) are quickest.", "warn", "Please be patient: free server.")
             + '<div class="cols"><div>'
             + ui.card("", f"""
               <div class="method" role="tablist" aria-label="Submission method">
@@ -455,12 +456,12 @@ def submit_form(request: Request):
               <div id="panel-link" role="tabpanel" aria-labelledby="tab-link" hidden>{link_form}</div>""")
             + '</div><div>'
             + ui.card("What happens next", """<ol class="muted" style="padding-left:20px;margin:0">
-              <li>The audio is transcribed and checked, usually in 10 to 40 seconds.</li>
+              <li>The speech is transcribed and the on-screen text is read, then both are checked. On the free demo server this can take a few minutes.</li>
               <li>You see one of: auto-approved, rejected, or sent to a person.</li>
-              <li>If rejected, fix the reel and resubmit, or dispute the finding.</li>
+              <li>If rejected, fix the video and resubmit, or dispute the finding.</li>
               <li>Nothing is approved just because it uploaded.</li></ol>""")
             + '</div></div>')
-    return page("Submit a Reel", body, u, "submit", [("Submit a Reel", None)], request)
+    return page("Submit a Video", body, u, "submit", [("Submit a Video", None)], request)
 
 
 @app.get("/help", response_class=HTMLResponse)
@@ -734,7 +735,7 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
         rep["findings"].append(make_finding(
             "SUPERVISION", "LOW", "IDENTITY_WEAK", 0, names.get(idres["project_ids"][0], ""),
             "The content never names the project, so the project could only be taken from your selection.",
-            "A person should confirm this reel is about the selected project."))
+            "A person should confirm this video is about the selected project."))
     if idres["out_of_scope"] and state not in ("NOT_AUTHORIZED",):
         rep["findings"].append(make_finding(
             "SUPERVISION", "HIGH", "UNAUTHORIZED_PROJECT", 0, ", ".join(names.get(p, "?") for p in idres["out_of_scope"]),
@@ -1027,8 +1028,8 @@ DECISION_TEXT = {
     "REJECTED": ("bad", "x-circle", "One or more claims break the brand rules. Fix the issues below and resubmit, or dispute the decision if you think it is wrong."),
     "BLOCKED": ("bad", "x-circle", "Confidential company information was mentioned, so this cannot be approved. Remove it and resubmit."),
     "REJECTED_FINAL": ("bad", "x-circle", "A reviewer looked at this submission and upheld the rejection."),
-    "NEEDS_CONFIRMATION": ("warn", "search", "BrandGuard is not certain which project this reel is about, so it did not check prices against a guess. Choose the project below to continue."),
-    "SUPERVISION": ("warn", "alert", "BrandGuard could not be sure about some parts of this reel, so a person must check it. This is not a confirmed violation."),
+    "NEEDS_CONFIRMATION": ("warn", "search", "BrandGuard is not certain which project this video is about, so it did not check prices against a guess. Choose the project below to continue."),
+    "SUPERVISION": ("warn", "alert", "BrandGuard could not be sure about some parts of this video, so a person must check it. This is not a confirmed violation."),
     "DISPUTED": ("warn", "scale", "The creator disagreed with the rejection. A reviewer must uphold or overturn it."),
 }
 
@@ -1165,14 +1166,14 @@ def view_submission(request: Request, sid: int):
     said_val = (s["dispute_said"] or "") if "dispute_said" in s.keys() else ""
     if not admin and s["user_id"] == u["id"] and s["status"] in ("REJECTED", "BLOCKED"):
         actions = ui.card("What would you like to do?",
-                          f'<p class="muted">Fix the issues and <a href="/submit">submit a corrected reel</a>, or dispute the '
+                          f'<p class="muted">Fix the issues and <a href="/submit">submit a corrected video</a>, or dispute the '
                           f'decision if you believe a finding is wrong.</p>'
                           f'<button type="button" class="btn secondary" data-dialog="dlg-dispute">{ui.icon("scale", 16)}Raise a dispute</button>')
         dialogs = (
             f'<dialog id="dlg-dispute" class="dlg" aria-labelledby="dlg-dispute-t">'
             f'<form method="post" action="/dispute/{sid}" data-lock>'
             f'<h2 id="dlg-dispute-t">Raise a dispute</h2>'
-            f'<p class="muted">Explain why the finding is wrong. Mention the time in the reel if you can. A builder will review it.</p>'
+            f'<p class="muted">Explain why the finding is wrong. Mention the time in the video if you can. A builder will review it.</p>'
             f'<label for="dsp-said">What did you actually say? <span class="muted">(optional, helps the builder check quickly)</span></label>'
             f'<input id="dsp-said" name="said" maxlength="80" placeholder="Example: 1 crore 30 lakh">'
             f'<label for="dsp-note">Why is the finding wrong? <span class="req">(required)</span></label>'
@@ -1216,7 +1217,7 @@ def view_submission(request: Request, sid: int):
     if s["source_url"]:
         src = (f'<dt>Source link</dt><dd><a href="{e(s["source_url"])}" target="_blank" rel="noopener noreferrer">'
                f'{e(s["source_url"])}</a></dd>')
-    details = ui.card("Submission details", f"""<dl class="kv"><dt>Reel</dt><dd>{e(s["filename"] or "Untitled")}</dd>
+    details = ui.card("Submission details", f"""<dl class="kv"><dt>Video</dt><dd>{e(s["filename"] or "Untitled")}</dd>
       <dt>Company</dt><dd>{e(s["bname"])}</dd><dt>Submitted by</dt><dd>{e(s["uname"])}</dd>
       <dt>Submitted</dt><dd>{e(s["created_at"])}</dd><dt>Spoken language</dt><dd>{e(LANG_LABEL.get(s["language"], s["language"] or ""))}</dd>{src}</dl>"""
                       + (ui.alert("This was fetched from a link. The platform's copy can differ from the original file, so the "
@@ -1274,7 +1275,7 @@ def view_submission(request: Request, sid: int):
     if other:
         parts.append('<h3 class="sec-title">Other checks</h3>' + "".join(finding_html(f) for f in other))
     if not findings and not claims:
-        parts.append(ui.empty("No issues found", "Nothing in this reel broke a rule."))
+        parts.append(ui.empty("No issues found", "Nothing in this video broke a rule."))
     if clean and (findings or claims):
         parts.append(f'<p class="muted" style="margin-top:12px">{ui.icon("check-circle", 14)} No issues found in: {", ".join(clean)}.</p>')
     if s["source_url"]:
@@ -1311,8 +1312,8 @@ def view_submission(request: Request, sid: int):
             pool = auth
         boxes = "".join(f'<label class="check"><input type="checkbox" name="project_id" value="{p["id"]}"> '
                         f'{e(p["official_name"])}{" (" + e(p["city"]) + ")" if p["city"] else ""}</label>' for p in pool)
-        confirm = ui.card("Which project is this reel about?",
-                          f'<form method="post" action="/confirm/{sid}" data-lock><p class="muted">Tick every project the reel promotes. '
+        confirm = ui.card("Which project is this video about?",
+                          f'<form method="post" action="/confirm/{sid}" data-lock><p class="muted">Tick every project the video promotes. '
                           f'Prices and facts are then checked against those projects only.</p>{boxes}'
                           f'<p></p><button class="btn" type="submit">Confirm and continue</button></form>')
 
@@ -1435,15 +1436,15 @@ def list_view(request, mode):
     else:
         listing = ui.empty("Nothing waiting for you" if mode == "queue" else "No submissions yet",
                            "New items that need a decision will appear here." if mode == "queue" else
-                           "Submit a reel to see its review here.",
-                           '' if admin else '<a class="btn" href="/submit">Submit a Reel</a>')
+                           "Submit a video to see its review here.",
+                           '' if admin else '<a class="btn" href="/submit">Submit a Video</a>')
     if mode == "queue":
         head = ui.page_header("Review Queue", f"{sum(counts.values())} submission(s) need a decision. Open one to see the evidence and decide.")
         crumbs, active = [("Review Queue", None)], "queue"
     else:
         head = ui.page_header("All Reviews" if admin else "My Submissions",
-                              "Every submission and its current status." if admin else "Every reel you have submitted for the selected company.",
-                              "" if admin else '<a class="btn" href="/submit">Submit a Reel</a>')
+                              "Every submission and its current status." if admin else "Every video you have submitted for the selected company.",
+                              "" if admin else '<a class="btn" href="/submit">Submit a Video</a>')
         crumbs, active = [("All Reviews" if admin else "My Submissions", None)], "reviews"
     return page(("Review Queue" if mode == "queue" else "Reviews"), head + ui.card("", toolbar + listing), u, active, crumbs, request)
 
@@ -1598,7 +1599,7 @@ def admin_dash(request, u):
 
     welcome = f"""<section class="card welcome" aria-labelledby="wl"><div class="card-head"><h2 id="wl">Welcome to your compliance workspace</h2>
       <button type="button" class="btn secondary sm" data-dismiss="builder">Dismiss</button></div>
-      <p>Creators submit reels for {e(brand["name"])}. BrandGuard checks them against your approved facts and rules, and sends
+      <p>Creators submit videos for {e(brand["name"])}. BrandGuard checks them against your approved facts and rules, and sends
       anything uncertain to you. Start with the Review Queue.</p>
       <ol class="steps"><li>Review submissions</li><li>Examine evidence</li><li>Approve, reject, or request supervision</li><li>Record the decision</li></ol></section>"""
     if queue:
@@ -2306,12 +2307,12 @@ def access_page(request: Request):
     boxes = "".join(f'<label class="check"><input type="checkbox" name="project_id" value="{p["id"]}"> {e(p["official_name"])}'
                     f'{" (" + e(p["city"]) + ")" if p["city"] else ""}</label>' for p in projs)
     uopts = "".join(f'<option value="{us["id"]}">{e(us["name"])}</option>' for us in users)
-    form = (f'<form method="post" action="/admin/access/grant" data-lock><label for="gu">Partner or freelancer</label>'
+    form = (f'<form method="post" action="/admin/access/grant" data-lock><label for="gu">Partner or fvideoancer</label>'
             f'<select id="gu" name="user_id">{uopts}</select><p></p><b>Projects</b><div>{boxes}</div><p></p>'
             f'<label for="gx">Access ends on (optional)</label><input id="gx" type="date" name="expires">'
             f'<p class="hint">Tick as many projects as needed. A city or company link does not grant every project, only the ticked ones.</p>'
             f'<button class="btn" type="submit">Grant access</button></form>')
-    body = (ui.page_header("Project Access", "Who may submit content for which project. Nobody needs a per-reel assignment.")
+    body = (ui.page_header("Project Access", "Who may submit content for which project. Nobody needs a per-video assignment.")
             + '<div class="stack">' + ui.card("Current access", ui.table(["Person", "Projects"], rows, "Access") if rows else ui.empty("No partners linked"))
             + ui.card("Grant access", form) + "</div>")
     return page("Project Access", body, u, "access", [("Project Access", None)], request)
@@ -2909,46 +2910,59 @@ async def guide_apply(request: Request):
     return RedirectResponse("/admin/projects" if (stats["projects"] or stats["updated"]) else "/admin/rules", 303)
 
 
-# ============================================================ test audio for judges (public, no sign-in)
+# ============================================================ demo files for judges (public, no sign-in)
 AUDIO_DIR = Path(__file__).resolve().parent / "demo_audio"
-AUDIO_EXT = (".m4a", ".mp3", ".wav", ".mp4", ".ogg", ".aac", ".webm")
+AUDIO_EXT = (".mp4", ".webm", ".m4a", ".mp3", ".wav", ".ogg", ".aac")
+VIDEO_EXT = (".mp4", ".webm")
 TEST_CLIPS = [
-    {"key": "approval", "n": 1, "title": "Approval", "tone": "ok",
+    {"key": "approval", "n": 1, "title": "Approval test",
      "say": "Demo Heights in Wakad, Pune. A 2 BHK home at 1 crore 30 lakh. Carpet area 720 square feet, with 2 bathrooms. "
             "Possession in December 2028.",
      "result": "Auto-Approved. The price, carpet area, bathrooms and possession all match the approved facts, so an "
                "approval ID is issued with no human needed.",
-     "steps": ["Download the audio below.", "Click Enter as Freelancer on the home page.",
-               "Open Submit a Reel, choose Demo Developer, and upload the file.",
+     "steps": ["Download the file below.", "Click Enter as Fvideoancer on the home page.",
+               "Open Submit a Video, choose Demo Developer, and upload the file.",
                "The result page opens. Look at the Claim-by-claim checks table: each spoken claim is matched to an approved fact."]},
-    {"key": "rejection", "n": 2, "title": "Rejection", "tone": "bad",
+    {"key": "rejection", "n": 2, "title": "Rejection test",
      "say": "Demo Heights in Wakad. 2 BHK for 1 crore 30 lakh. Guaranteed returns, the price will double in two years. "
             "Last chance!",
      "result": "Rejected. The price is correct, but \"guaranteed returns\" and \"price will double\" are banned phrases "
                "(\"last chance\" is also flagged if the sample brand guide has been imported). Each finding shows the "
-               "exact second it was spoken, why it matters and what to change.",
-     "steps": ["Download the audio below.", "Enter as Freelancer and open Submit a Reel.",
+               "exact second it appeared, whether it was spoken or shown on screen, why it matters and what to change.",
+     "steps": ["Download the file below.", "Enter as Fvideoancer and open Submit a Video.",
                "Choose Demo Developer and upload the file.",
                "Read the findings on the result page. The creator is told exactly what to fix."]},
-    {"key": "dispute", "n": 3, "title": "Dispute", "tone": "warn",
+    {"key": "dispute", "n": 3, "title": "Dispute test",
      "say": "Demo Heights, Wakad. 3 BHK flats available at 1 crore 50 lakh. Possession in December 2028.",
      "result": "Rejected, because 3 BHK is approved at 1 crore 90 lakh, not 1 crore 50 lakh. You then dispute it and "
                "play the builder to resolve it. This shows that a person always has the final word.",
-     "steps": ["Download the audio below, then Enter as Freelancer, open Submit a Reel, choose Demo Developer and upload it.",
+     "steps": ["Download the file below, then Enter as Fvideoancer, open Submit a Video, choose Demo Developer and upload it.",
                "The submission is Rejected for a price mismatch. Click Raise a dispute.",
                "Write why the finding is wrong (for example: \"I quoted the offer price for a limited floor\"). "
                "Optionally type what you actually said. Click Submit dispute. The status becomes Disputed.",
                "In the sidebar, switch the demo role to Builder. Open Review Queue, then open the disputed submission.",
                "The builder sees the evidence and the creator's explanation. Click Overturn decision to approve it "
                "(an approval ID is issued), or Uphold rejection to keep it rejected (a reason is required).",
-               "Switch back to Freelancer to see the outcome on the submission, and open Audit Trail as Builder to see "
+               "Switch back to Fvideoancer to see the outcome on the submission, and open Audit Trail as Builder to see "
                "every step recorded with who did it and when."]},
+    {"key": "ocr", "file": "test", "n": 4, "title": "On-screen text (OCR) test video",
+     "say": "",
+     "result": "BrandGuard reads the text on screen frame by frame. On the result page, the check \"On-screen text\" shows "
+               "Done, and the card \"Text read from the screen\" lists what appeared in the video, such as the price "
+               "(₹1,30,00,000), carpet area, bathrooms and possession date, each with its time. The on-screen price is "
+               "compared with the approved price and with the price spoken in the video.",
+     "steps": ["Download the video below.", "Click Enter as Fvideoancer, open Submit a Video, choose Demo Developer and upload it.",
+               "Wait for the review. On the free server this takes a while (see the note at the top of this page).",
+               "On the result page, open the \"Text read from the screen\" card and the \"On-screen text\" and "
+               "\"Voice versus screen\" checks."]},
 ]
 
 
 def _clip_file(key):
+    clip = next((c for c in TEST_CLIPS if c["key"] == key), None)
+    base = clip.get("file", key) if clip else key
     for ext in AUDIO_EXT:
-        p = AUDIO_DIR / f"{key}{ext}"
+        p = AUDIO_DIR / f"{base}{ext}"
         if p.is_file():
             return p
     return None
@@ -2961,17 +2975,24 @@ def test_audio_page(request: Request):
     for c in TEST_CLIPS:
         f = _clip_file(c["key"])
         if f:
-            media = (f'<audio controls preload="none" style="width:100%;margin:8px 0 12px" src="/test-audio/file/{c["key"]}?inline=1">'
-                     f'Your browser cannot play audio.</audio>'
-                     f'<a class="btn" href="/test-audio/file/{c["key"]}" download>{ui.icon("upload", 16)}Download {e(c["title"])} audio</a>')
+            src = f'/test-audio/file/{c["key"]}?inline=1'
+            if f.suffix.lower() in VIDEO_EXT:
+                player = (f'<video controls preload="none" playsinline style="width:100%;max-height:360px;margin:8px 0 12px;'
+                          f'background:#000;border-radius:8px" src="{src}">Your browser cannot play video.</video>')
+            else:
+                player = (f'<audio controls preload="none" style="width:100%;margin:8px 0 12px" src="{src}">'
+                          f'Your browser cannot play audio.</audio>')
+            media = player + (f'<a class="btn" href="/test-audio/file/{c["key"]}" download>{ui.icon("upload", 16)}'
+                              f'Download demo file {c["n"]}</a>')
         else:
-            media = ui.alert("This audio file has not been added yet.", "warn")
+            media = ui.alert("This demo file has not been added yet.", "warn")
         steps = "".join(f"<li>{e(s)}</li>" for s in c["steps"])
-        inner = (f'<p class="muted" style="margin-bottom:4px">What is said in the clip</p>'
-                 f'<p style="margin-top:0"><i>"{e(c["say"])}"</i></p>{media}'
-                 f'<h3 class="sec-title">What to do</h3><ol style="margin:0 0 12px;padding-left:20px">{steps}</ol>'
+        said = (f'<p class="muted" style="margin-bottom:4px">What is said in the clip</p>'
+                f'<p style="margin-top:0"><i>"{e(c["say"])}"</i></p>') if c["say"] else ""
+        inner = (said + media
+                 + f'<h3 class="sec-title">What to do</h3><ol style="margin:0 0 12px;padding-left:20px">{steps}</ol>'
                  f'<h3 class="sec-title">What you should see</h3><p style="margin:0">{e(c["result"])}</p>')
-        cards.append(ui.card(f'{c["n"]}. {c["title"]} audio', inner, cls=""))
+        cards.append(ui.card(f'Demo file {c["n"]}: {c["title"]}', inner, cls=""))
     guide = AUDIO_DIR / "Demo_Developer_Brand_Guide.pdf"
     extra = ""
     if guide.is_file():
@@ -2979,16 +3000,25 @@ def test_audio_page(request: Request):
                         '<p class="muted">As Builder, open Brand Rules and click Import from PDF, then upload this file. '
                         'BrandGuard lists the rules it found, you confirm them, and they apply to new submissions straight away.</p>'
                         '<a class="btn secondary" href="/test-audio/file/guide" download>Download sample brand guide (PDF)</a>')
-    start = ('<a class="btn" href="/enter/freelancer">Enter as Freelancer</a> '
+    start = ('<a class="btn" href="/enter/fvideoancer">Enter as Fvideoancer</a> '
              '<a class="btn secondary" href="/enter/admin">Enter as Builder</a>') if not u else ""
-    body = (ui.page_header("Test Audio for Judges",
-                           "Three short clips to test the main workflow: one approved, one rejected, one disputed. "
-                           "No sign-up is needed. Use the demo roles in the sidebar or the buttons below.", start)
-            + '<div class="stack">' + "".join(cards) + extra
-            + ui.alert("These recordings are made for this demo. The company, projects and prices are fictional.", "info") + "</div>")
+    body = (ui.page_header("Demo Files for Judges",
+                           "Ready-made demo recordings and a demo video to test the main workflow: one approved, one rejected, "
+                           "one disputed, and one that shows on-screen text being read. No sign-up is needed. Use the demo "
+                           "roles in the sidebar or the buttons below.", start)
+            + '<div class="stack">'
+            + ui.alert("These files are made for demonstration only. Download a file here, then upload it on the Submit a "
+                       "Video page to see how BrandGuard reviews it. The company, projects and prices are fictional.",
+                       "info", "For demo use.")
+            + ui.alert("This demo runs on a free Render server, which has very little CPU and memory. A review needs speech "
+                       "recognition plus reading every frame of the video, so it can take a few minutes, and the first "
+                       "request after a quiet period is slower because the server has to wake up. Please keep the page open "
+                       "and wait. The same review takes seconds on a normal server.",
+                       "warn", "Please be patient.")
+            + "".join(cards) + extra + "</div>")
     if u:
-        return page("Test Audio", body, u, "testaudio", [("Test Audio", None)], request)
-    return page("Test Audio", body)
+        return page("Demo Files", body, u, "testaudio", [("Demo Files", None)], request)
+    return page("Demo Files", body)
 
 
 @app.get("/test-audio/file/{key}")
@@ -2999,7 +3029,7 @@ def test_audio_file(key: str, inline: int = 0):
     else:
         clip = next((c for c in TEST_CLIPS if c["key"] == key), None)
         p = _clip_file(key) if clip else None
-        name = f'BrandGuard_Test_{clip["n"]}_{clip["title"]}{p.suffix}' if p else ""
+        name = f'BrandGuard_Demo_{clip["n"]}_{re.sub(r"[^A-Za-z0-9]+", "_", clip["title"]).strip("_")}{p.suffix}' if p else ""
     if not p or not p.is_file():
         return HTMLResponse("File not found.", status_code=404)
     return FileResponse(str(p), filename=name, content_disposition_type="inline" if inline else "attachment")
