@@ -187,8 +187,8 @@ def classify_price(value, prices, conf, threshold):
 
 
 # --------------------------------------------------------------------- review
-def review(segments, reg, threshold=0.65):
-    prices = [(c["name"], c["price"]) for c in reg["configs"]]
+def review(segments, reg, threshold=0.65, check_prices=True):
+    prices = [(c["name"], c["price"]) for c in reg.get("configs", [])]
     banned = [norm(x).lower() for x in reg.get("banned_phrases", [])]
     secret = [norm(x).lower() for x in reg.get("confidential", [])]
     allowed = {re.sub(r"\D", "", c)[-10:] for c in reg.get("allowed_contacts", [])}
@@ -235,7 +235,7 @@ def review(segments, reg, threshold=0.65):
                     "Remove or rephrase this claim.", conf)
 
         # 4) prices
-        for p in extract_prices(text):
+        for p in (extract_prices(text) if check_prices and prices else []):
             status, ftype, why, name, ref = classify_price(p["value"], prices, conf, threshold)
             if status == "PASS":
                 continue
