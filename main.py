@@ -18,9 +18,11 @@ from urllib.parse import quote, urlparse
 
 import requests
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
+import learning as LRN
+import ocr as OCR
 import realestate as RE
 import ui
 from engine import (LAKH, UNITS, classify_price, extract_prices, fmt_money, fmt_time,
@@ -139,6 +141,7 @@ def init_db():
 init_db()
 RE.setup(DB_PATH)
 RE.seed_if_empty()
+LRN.setup(DB_PATH)
 
 
 def log(sid, actor, action, note="", brand_id=None):
@@ -284,7 +287,8 @@ def home(request: Request):
           {role("freelancer", "building", "Freelancer",
                 "Works with two companies under one login and switches between them.", "Enter as Freelancer")}
         </div>
-        <p class="muted" style="margin-top:20px">This is a demo. No sign-up is needed and the roles are not real accounts.</p>"""
+        <p style="margin-top:20px"><a class="btn secondary" href="/test-audio">Judges: download test audio</a></p>
+        <p class="muted" style="margin-top:12px">This is a demo. No sign-up is needed and the roles are not real accounts.</p>"""
         return page("Welcome", body)
     return admin_dash(request, u) if u["role"] == "admin" else submitter_dash(request, u)
 
@@ -630,8 +634,9 @@ def transcribe_file(src: Path, lang: str, glossary):
     finally:
         wav.unlink(missing_ok=True)
 
+        
 
-def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_link=False):
+def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_link=False, screen=None):
     """Rules plus project-aware claim checks. Never approves anything it could not fully check."""
     rep = review(segs, reg, THRESHOLD, check_prices=False)
     caption_parts = RE._split_caption(caption) if caption.strip() else []
@@ -641,7 +646,15 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
             f["source"] = "caption"
             rep["findings"].append(f)
 
+    screen_lines = list((screen or {}).get("lines", []))
+    if screen_lines:  # banned phrases and confidential terms drawn on screen
+        scr = review([{"start": l["start"], "end": l["end"], "text": l["text"], "conf": l["conf"]} for l in screen_lines],
+                     reg, THRESHOLD, check_prices=False)
+        for f in scr["findings"]:
+            f["source"] = "screen"
+            rep["findings"].append(f)
     sources = [(s["text"], s["start"], "audio") for s in segs]
+    sources += [(l["text"], l["start"], "screen") for l in screen_lines]
     if caption.strip():
         sources.append((caption, 0, "caption"))
     seen = set()
@@ -658,6 +671,7 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
     authorised = RE.authorized_projects(u["id"], brand_id)
     all_p = RE.brand_projects(brand_id)
     texts = [("audio", i, s["text"]) for i, s in enumerate(segs)] + [("caption", i, c) for i, c in enumerate(caption_parts)]
+    texts += [("screen", i, l["text"]) for i, l in enumerate(screen_lines)]
     if confirmed:
         idres = {"state": "CONFIRMED", "project_ids": list(confirmed), "evidence": {}, "out_of_scope": [],
                  "segments": {}, "note": "Project confirmed by the submitter."}
@@ -671,7 +685,11 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
     rep["project_ids"] = list(idres["project_ids"])
     rep["inputs"] = {"segments": [{"start": s["start"], "end": s.get("end", s["start"]), "text": redact(s["text"], reg),
                                    "conf": s.get("conf", 1.0)} for s in segs],
-                     "caption": redact(caption, reg)}
+                     "caption": redact(caption, reg),
+                     "screen": [{"start": l["start"], "end": l["end"], "text": redact(l["text"], reg),
+                                 "raw": redact(l.get("raw", l["text"]), reg), "conf": l["conf"]} for l in screen_lines]}
+    if screen is not None:
+        rep["screen_meta"] = {"frames": screen.get("frames", 0), "total": screen.get("total", 0), "partial": bool(screen.get("partial"))}
     rep["policy"] = RE.POLICY_VERSION
     rep["claims"], rep["facts_used"] = [], []
     rep["needs_confirmation"] = state in ("LIKELY", "AMBIGUOUS", "NOT_FOUND", "CONFLICT") and bool(segs or caption.strip())
@@ -697,10 +715,19 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
             "Remove that project, or ask the company to grant access."))
 
     if not rep["needs_confirmation"] and idres["project_ids"]:
-        by_proj, unassigned = RE.assign_segments(segs, caption_parts, idres, all_p)
+        by_proj, unassigned = RE.assign_segments(segs, caption_parts, idres, all_p, screen_lines)
         claims, used = RE.validate(by_proj, all_p, THRESHOLD)
         rep["claims"], rep["facts_used"] = claims, used
         for c in claims:
+            if c["verdict"] == RE.VIOLATION and c["kind"] in ("price", "booking"):
+                prec = LRN.precedent(brand_id, c)
+                if prec:
+                    said = f" The creator had said {fmt_money(prec['said_value'])}." if prec["said_value"] else ""
+                    c["verdict"] = RE.REVIEW
+                    c["reason"] += (f" A similar reading was overturned by a builder before "
+                                    f"(submission #{prec['sub_id']}).{said}")
+                    c["fix"] = "A manager should listen to this moment and confirm."
+                    c["precedent"] = prec["sub_id"]
             if c["verdict"] != RE.VERIFIED:
                 rep["findings"].append(RE.claim_to_finding(c))
         for src_, t_, conf_, text_ in unassigned:
@@ -709,8 +736,6 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
                     "SUPERVISION", "MEDIUM", "PROJECT_UNCERTAIN", t_, text_[:80],
                     "A price or area was mentioned, but it could not be linked to one project.",
                     "A person should check which project this refers to.", conf_, src_))
-    for ctx in ():
-        pass
 
     rep["passed"] = sum(1 for c in rep["claims"] if c["verdict"] == RE.VERIFIED)
     speech = bool(segs)
@@ -724,7 +749,31 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
                    "done" if not rep["needs_confirmation"] and idres["project_ids"] else "pending",
                    "Checked against the approved facts of the identified project."
                    if idres["project_ids"] and not rep["needs_confirmation"] else "Waiting for the project to be confirmed."))
-    checks.append(("On-screen text and visuals", "not_available", "Not analysed. Text drawn on screen is not read yet."))
+    if screen is None:
+        checks.append(("On-screen text", "not_available",
+                       "Not analysed. This file has no video, or on-screen reading was off or unavailable."))
+    elif screen.get("partial"):
+        checks.append(("On-screen text", "incomplete",
+                       f"Only {screen['frames']} of {screen['total']} frames were read in the time allowed."))
+        rep["findings"].append(make_finding(
+            "SUPERVISION", "MEDIUM", "SCREEN_PARTIAL", 0, f"{screen['frames']}/{screen['total']} frames",
+            "Not every frame could be read in the time allowed, so some on-screen text may not have been checked.",
+            "A person should watch the rest of the video."))
+    else:
+        checks.append(("On-screen text", "done",
+                       f"{screen.get('frames', 0)} frames read (2 per second plus every scene change); "
+                       f"{len(screen_lines)} distinct text lines found."))
+    spoken_p = {p["value"] for s in segs for p in extract_prices(s["text"])}
+    shown_p = {p["value"] for l in screen_lines for p in extract_prices(l["text"])}
+    if spoken_p and shown_p and not (spoken_p & shown_p):
+        rep["findings"].append(make_finding(
+            "SUPERVISION", "HIGH", "VOICE_SCREEN_MISMATCH", 0,
+            "voice: " + ", ".join(fmt_money(v) for v in sorted(spoken_p)) + " / screen: " + ", ".join(fmt_money(v) for v in sorted(shown_p)),
+            "The price spoken in the video is different from the price shown on screen.",
+            "Make the voice and the on-screen price the same, and match the approved price."))
+    checks.append(("Voice versus screen", "done" if (spoken_p and shown_p) else "incomplete",
+                   "Spoken and on-screen prices compared." if (spoken_p and shown_p)
+                   else "Needs both a spoken price and an on-screen price to compare."))
     checks.append(("RERA authoritative verification", "not_available",
                    "Not available. A RERA number is only compared with the BrandGuard registry unless an administrator has recorded an official check."))
     rep["checks"] = checks
@@ -785,7 +834,8 @@ def run_review(u, brand_id, path, sha, filename, language, source_url=None, capt
         return err_page(u, "You do not have access to that project.")
     try:
         segs = transcribe_file(path, language, glossary_for(reg, brand_id, u["id"]))
-        rep = analyze(u, brand_id, segs, caption, reg, hint_pid, is_link=bool(source_url))
+        screen = None if source_url else OCR.read_screen(path, MAX_SECONDS)
+        rep = analyze(u, brand_id, segs, caption, reg, hint_pid, is_link=bool(source_url), screen=screen)
     except Exception as ex_:
         msg = str(ex_) if isinstance(ex_, (ValueError, RuntimeError)) else "Something went wrong while reviewing this file."
         return err_page(u, msg)
@@ -836,7 +886,12 @@ async def confirm_project(request: Request, sid: int):
     reg = json.loads(q("SELECT registry FROM brands WHERE id=?", (s["brand_id"],))[0]["registry"])
     segs = old.get("inputs", {}).get("segments", [])
     caption = old.get("inputs", {}).get("caption", "")
-    rep = analyze(u, s["brand_id"], segs, caption, reg, confirmed=ids, is_link=bool(s["source_url"]))
+    scr_old = old.get("inputs", {}).get("screen")
+    screen = None
+    if scr_old is not None and old.get("screen_meta"):
+        screen = {"lines": [{"start": l["start"], "end": l["end"], "text": l["text"], "raw": l.get("raw", l["text"]),
+                             "conf": l["conf"]} for l in scr_old], **old["screen_meta"]}
+    rep = analyze(u, s["brand_id"], segs, caption, reg, confirmed=ids, is_link=bool(s["source_url"]), screen=screen)
     if old.get("duplicate_of"):
         rep["duplicate_of"] = old["duplicate_of"]
     status = status_of(rep)
@@ -934,7 +989,10 @@ ACTION_LABEL = {
     "FACTS_UPDATED": "Brand details updated", "PROJECT_CONFIRMED": "Project confirmed by submitter",
     "DUPLICATE_FOUND": "Identical file found", "PROJECT_ADDED": "Project added", "PROJECT_EDITED": "Project details changed",
     "FACT_SET": "Approved fact saved", "FACT_ENDED": "Approved fact withdrawn", "ACCESS_GRANTED": "Project access granted",
-    "ACCESS_REVOKED": "Project access revoked", "UNIT_ADDED": "Property type added", "RERA_RECORDED": "RERA check recorded", "PRICE_SAVED": "Approved price saved", "PRICE_REMOVED": "Approved price removed",
+    "ACCESS_REVOKED": "Project access revoked", "UNIT_ADDED": "Property type added", "RERA_RECORDED": "RERA check recorded",
+    "PRICE_SAVED": "Approved price saved", "PRICE_REMOVED": "Approved price removed",
+    "RULES_IMPORTED": "Brand rules imported from document",
+    "CASE_REMEMBERED": "Dispute remembered for next time",
 }
 DECISION_TEXT = {
     "AUTO_APPROVED": ("ok", "check-circle", "Every price matched the approved facts and nothing needed a person to check."),
@@ -953,7 +1011,8 @@ def finding_html(f):
     kind = f["type"]
     label = TYPE_LABEL.get(kind, kind.replace("_", " ").title())
     cap = f.get("source") == "caption"
-    where = "Post title or description" if cap else f'Spoken at {fmt_time(f["time"])}'
+    where = ("Post title or description" if cap else f'On screen at {fmt_time(f["time"])}' if f.get("source") == "screen"
+             else f'Spoken at {fmt_time(f["time"])}')
     status_chip = ui.badge("Needs a human check" if f["status"] == "SUPERVISION" else "Violation",
                            tone, "alert" if tone == "warn" else "x-circle")
     conf = ""
@@ -992,7 +1051,8 @@ def claims_table(claims):
     rows = []
     for c in claims:
         b = VERDICT_BADGE.get(c["verdict"], VERDICT_BADGE["REVIEW"])
-        when = "Caption" if c.get("source") == "caption" else fmt_time(c.get("time") or 0)
+        when = ("Caption" if c.get("source") == "caption" else
+                f'{fmt_time(c.get("time") or 0)} (screen)' if c.get("source") == "screen" else fmt_time(c.get("time") or 0))
         off = e(str(c.get("official") or "-"))
         if c.get("fact_version"):
             off += f'<br><span class="muted">{e(c["fact_version"])}</span>'
@@ -1043,6 +1103,7 @@ def timeline_html(rows):
                     f'{"<br>" + e(a["note"]) if a["note"] else ""}</span></li>' for a in rows)
     return f'<ul class="timeline">{items}</ul>'
 
+    
 
 @app.get("/s/{sid}", response_class=HTMLResponse)
 def view_submission(request: Request, sid: int):
@@ -1074,21 +1135,37 @@ def view_submission(request: Request, sid: int):
 
     # ---- actions
     actions, dialogs = "", ""
+    said_val = (s["dispute_said"] or "") if "dispute_said" in s.keys() else ""
     if not admin and s["user_id"] == u["id"] and s["status"] in ("REJECTED", "BLOCKED"):
         actions = ui.card("What would you like to do?",
                           f'<p class="muted">Fix the issues and <a href="/submit">submit a corrected reel</a>, or dispute the '
                           f'decision if you believe a finding is wrong.</p>'
                           f'<button type="button" class="btn secondary" data-dialog="dlg-dispute">{ui.icon("scale", 16)}Raise a dispute</button>')
-        dialogs = ui.confirm_dialog("dlg-dispute", "Raise a dispute",
-                                    "Explain why the finding is wrong. Mention the time in the reel if you can. A builder will review it.",
-                                    f"/dispute/{sid}", "Submit dispute", "primary",
-                                    ("note", "Why is the finding wrong?", True))
+        dialogs = (
+            f'<dialog id="dlg-dispute" class="dlg" aria-labelledby="dlg-dispute-t">'
+            f'<form method="post" action="/dispute/{sid}" data-lock>'
+            f'<h2 id="dlg-dispute-t">Raise a dispute</h2>'
+            f'<p class="muted">Explain why the finding is wrong. Mention the time in the reel if you can. A builder will review it.</p>'
+            f'<label for="dsp-said">What did you actually say? <span class="muted">(optional, helps the builder check quickly)</span></label>'
+            f'<input id="dsp-said" name="said" maxlength="80" placeholder="Example: 1 crore 30 lakh">'
+            f'<label for="dsp-note">Why is the finding wrong? <span class="req">(required)</span></label>'
+            f'<textarea id="dsp-note" name="note" rows="3" maxlength="1000" required></textarea>'
+            f'<div class="dlg-actions"><button type="button" class="btn secondary" data-close>Cancel</button>'
+            f'<button type="submit" class="btn primary">Submit dispute</button></div></form></dialog>')
     elif not admin and s["status"] == "DISPUTED":
-        actions = ui.card("Your dispute", f'<p>{e(s["dispute_note"] or "")}</p>'
+        you_said = f'<p><b>You said:</b> {e(said_val)}</p>' if said_val else ""
+        actions = ui.card("Your dispute", f'<p>{e(s["dispute_note"] or "")}</p>{you_said}'
                           '<p class="muted">Waiting for a builder to review it. You will see the outcome here.</p>')
     if admin and s["brand_id"] == u["brand_id"] and s["status"] in QUEUE_STATUSES:
         disputed = s["status"] == "DISPUTED"
-        ctx = (f'<p><b>Creator\'s explanation:</b> {e(s["dispute_note"] or "")}</p>' if disputed else "")
+        ctx = ""
+        if disputed:
+            ctx = f'<p><b>Creator\'s explanation:</b> {e(s["dispute_note"] or "")}</p>'
+            if said_val:
+                ctx += f'<p><b>What the creator says they said:</b> {e(said_val)}</p>'
+            ctx += ('<p class="muted">If you overturn this on a price or booking claim, BrandGuard remembers the case. '
+                    'The next time the same reading appears, it asks a person to check instead of rejecting. '
+                    'It never approves on its own, and you can switch a remembered case off under Learned Cases.</p>')
         yes, no = ("Overturn decision", "Uphold rejection") if disputed else ("Approve", "Reject")
         actions = ui.card("Your decision", ctx + '<p class="muted">Review the findings, then record a decision. '
                           'It is saved to the audit trail.</p>'
@@ -1129,6 +1206,18 @@ def view_submission(request: Request, sid: int):
                              f'confidence and may contain mistakes.</p>{rows}')
     else:
         transcript = ui.card("Transcript and recognition confidence", ui.empty("No transcript available"))
+    scr_lines = rep.get("inputs", {}).get("screen") or []
+    meta = rep.get("screen_meta")
+    if meta is not None:
+        if scr_lines:
+            srows = "".join(
+                f'<div class="tr-row"><time>{fmt_time(l["start"])}</time><span>{e(l.get("raw") or l["text"])}</span>'
+                f'<span class="muted conf">{round(l["conf"] * 100)}%</span></div>' for l in scr_lines)
+        else:
+            srows = ui.empty("No text was found on screen")
+        transcript += ui.card("Text read from the screen",
+                              f'<p class="muted">{meta["frames"]} frames read (2 per second plus every scene change). '
+                              f'Each line is shown once, at the first time it appeared.</p>{srows}')
 
     # ---- right column: grouped findings
     parts, clean = [], []
@@ -1211,11 +1300,15 @@ def view_submission(request: Request, sid: int):
 
 
 @app.post("/dispute/{sid}")
-def dispute(request: Request, sid: int, note: str = Form("")):
+def dispute(request: Request, sid: int, note: str = Form(""), said: str = Form("")):
     u, s = me(request), get_sub(sid)
     if u and s and s["user_id"] == u["id"] and s["status"] in ("REJECTED", "BLOCKED") and note.strip():
-        ex("UPDATE submissions SET status='DISPUTED', dispute_note=? WHERE id=?", (note.strip()[:1000], sid))
-        log(sid, u["name"], "DISPUTE_RAISED", note.strip()[:300])
+        ex("UPDATE submissions SET status='DISPUTED', dispute_note=?, dispute_said=? WHERE id=?",
+           (note.strip()[:1000], said.strip()[:80], sid))
+        detail = note.strip()[:300]
+        if said.strip():
+            detail += f" (creator says they said: {said.strip()[:80]})"
+        log(sid, u["name"], "DISPUTE_RAISED", detail)
         request.session["flash"] = "Dispute sent to the builder."
     return RedirectResponse(f"/s/{sid}", 303)
 
@@ -1235,9 +1328,18 @@ def decide(request: Request, sid: int, decision: str = Form(...), note: str = Fo
         ex("UPDATE submissions SET status=?, approval_id=?, decision_note=? WHERE id=?",
            (status, approval, note.strip()[:1000], sid))
         log(sid, u["name"], action, (approval or "") + (" " + note.strip()[:300] if note.strip() else ""))
+        if was_dispute and decision == "approve":
+            try:
+                n = LRN.record_overturn(get_sub(sid), rep_of(s), note.strip()[:300])
+                if n:
+                    log(sid, "BrandGuard engine", "CASE_REMEMBERED",
+                        f"{n} reading(s) from this dispute will be sent to a person next time, not rejected.")
+            except Exception:
+                pass  # learning must never block a decision
         request.session["flash"] = "Decision recorded: " + ui.STATUS[status][0] + "."
     return RedirectResponse(f"/s/{sid}", 303)
 
+    
 
 # ------------------------------------------------------------------ list views
 TABS = {
@@ -1499,6 +1601,7 @@ def admin_dash(request, u):
             + ui.card("Compliance insights", insights) + '</div></div>')
     return page("Overview", body, u, "overview", [], request)
 
+    
 
 def lines(s):
     return [x.strip() for x in (s or "").splitlines() if x.strip()]
@@ -1574,7 +1677,8 @@ def rules_page(request: Request, err: str = ""):
               f'<input id="q" type="search" name="q" value="{e(term)}" placeholder="Search all rules">'
               f'<button class="btn secondary" type="submit">{ui.icon("search", 16)}Search</button></form></div>')
     body = (ui.page_header("Brand Rules", f"The rules every submission for {e(reg.get('brand', ''))} is checked against. "
-                           "Changes apply to new submissions only.")
+                           "Changes apply to new submissions only.",
+                           f'<a class="btn" href="/admin/guide">{ui.icon("upload", 16)}Import from PDF</a>')
             + '<div class="stack">' + (ui.alert(e(err), "bad") if err else "") + ui.card("", search)
             + "".join(cards) + "</div>" + "".join(dialogs))
     return page("Brand Rules", body, u, "rules", [("Brand Rules", None)], request)
@@ -1812,6 +1916,7 @@ def verify_check(request: Request, file: UploadFile = File(...)):
                                       "or it was never approved in this form.", "warn", "No match.") + fp)
     return verify_page(request, u, result)
 
+    
 
 # ============================================================ projects, facts, access (admin)
 def own_project(u, pid):
@@ -2214,3 +2319,660 @@ def access_revoke(request: Request, grant_id: int = Form(0)):
         log(None, u["name"], "ACCESS_REVOKED", f"grant {grant_id}", u["brand_id"])
         request.session["flash"] = "Access removed. It takes effect immediately."
     return RedirectResponse("/admin/access", 303)
+
+
+# ============================================================ learned cases (new)
+@app.get("/admin/learned", response_class=HTMLResponse)
+def learned_page(request: Request):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    cases = LRN.list_cases(u["brand_id"])
+    rows = []
+    for c in cases:
+        state = ui.badge("Active", "ok", "check-circle") if c["active"] else ui.badge("Switched off", "neutral", "clock")
+        said = e(c["said_text"] or "-")
+        btn = ""
+        if c["active"]:
+            btn = (f'<form method="post" action="/admin/learned/off" style="display:inline">'
+                   f'<input type="hidden" name="case_id" value="{c["id"]}">'
+                   f'<button class="btn secondary sm" type="submit" aria-label="Switch off this remembered case">Switch off</button></form>')
+        rows.append([e(KIND_LABEL.get(c["kind"], c["kind"])), e(str(c["heard"] or "")), e(str(c["official"] or "")), said,
+                     f'<a href="/s/{c["sub_id"]}">#{c["sub_id"]}</a>', str(c["times"]), e(c["last_seen"] or c["created_at"] or ""),
+                     state, btn])
+    table = (ui.table(["Claim", "System heard", "Approved value", "Creator said", "Overturned in", "Seen", "Last seen", "State", ""],
+                      rows, "Remembered dispute cases")
+             if rows else ui.empty("Nothing remembered yet",
+                                   "When you overturn a dispute about a price or booking amount, the case appears here."))
+    body = (ui.page_header("Learned Cases",
+                           "Disputes you overturned. If the same reading shows up again for this company, BrandGuard asks a person "
+                           "to check instead of rejecting it.")
+            + '<div class="stack">'
+            + ui.alert("A remembered case never approves anything on its own. It only changes a rejection into a human check. "
+                       "Switch a case off if you no longer want that.", "info", "How this works.")
+            + ui.card("Remembered cases", table) + "</div>")
+    return page("Learned Cases", body, u, "learned", [("Learned Cases", None)], request)
+
+
+@app.post("/admin/learned/off")
+def learned_off(request: Request, case_id: int = Form(0)):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    if LRN.switch_off(u["brand_id"], case_id):
+        log(None, u["name"], "CASE_REMEMBERED", f"Remembered case {case_id} switched off", u["brand_id"])
+        request.session["flash"] = "Case switched off. That reading will be rejected normally again."
+    return RedirectResponse("/admin/learned", 303)
+
+    
+
+
+# ============================================================ import brand rules and projects from a PDF (builder)
+GUIDE_HEADINGS = {
+    "banned_phrases": ("banned phrases", "banned phrase", "banned words", "banned claims", "prohibited phrases",
+                       "prohibited claims", "restricted phrases", "do not say", "never say", "phrases to avoid"),
+    "confidential": ("confidential", "confidential terms", "confidential information", "internal terms",
+                     "never disclose", "do not disclose"),
+    "allowed_contacts": ("approved contacts", "approved contact numbers", "approved contact", "authorised contacts",
+                         "authorized contacts", "contact numbers", "official contacts"),
+    "glossary": ("glossary", "speech glossary", "project names", "key terms", "brand terms"),
+}
+GUIDE_LABEL = {"banned_phrases": "Banned phrases", "confidential": "Confidential terms",
+               "allowed_contacts": "Approved contact numbers", "glossary": "Speech glossary"}
+_BULLET = re.compile(r"^\s*(?:[•●▪‣\*\-–—]|\(?\d{1,2}[.)])\s+")
+
+# project lines: "Project: Name", then "City: Pune", then one line per property type
+PROJECT_KEYS = {
+    "city": ("city",),
+    "locality": ("locality", "area", "location", "micro market"),
+    "rera": ("rera", "rera number", "rera no", "rera registration"),
+    "possession": ("possession", "possession date"),
+    "ready": ("ready to move", "ready to move in"),
+    "booking": ("booking amount", "token amount"),
+    "short": ("short name",),
+    "aliases": ("other names", "aliases", "also called", "hindi name", "marathi name"),
+}
+_PROJ_START = re.compile(r"^(?:project|project name)\s*[:\-–]\s*(.+)$", re.I)
+_KV = re.compile(r"^([A-Za-z ]{3,30}?)\s*[:\-–]\s*(.+)$")
+_UNIT = re.compile(r"^(.{2,50}?)\s*[:\-–]\s*(.*\bprice\b.*)$", re.I)
+
+
+def pdf_text(data, filename):
+    """Plain text of a PDF or TXT. Scanned PDFs have no text layer and are refused clearly."""
+    if filename.lower().endswith(".txt"):
+        return data.decode("utf-8", "ignore")
+    from pypdf import PdfReader
+    import io as _io
+    r = PdfReader(_io.BytesIO(data))
+    if r.is_encrypted:
+        raise ValueError("This PDF is password protected. Remove the password and upload it again.")
+    if len(r.pages) > 40:
+        raise ValueError("This PDF has more than 40 pages. Upload only the brand guidelines section.")
+    text = "\n".join((p.extract_text() or "") for p in r.pages)
+    if len(text.strip()) < 20:
+        raise ValueError("No readable text was found. This looks like a scanned image, which is not supported yet. "
+                         "Upload a PDF exported from a document, or a .txt file.")
+    return text
+
+
+def _heading_key(line):
+    """Returns (rule key, inline text after the colon) when the line is a known rules heading."""
+    base = re.sub(r"\s+", " ", _BULLET.sub("", line)).strip()
+    t = base.strip(":").strip().lower()
+    for k, names in GUIDE_HEADINGS.items():
+        if t in names:
+            return k, ""
+    m = re.match(r"^([A-Za-z ]{3,30})\s*:\s*(.+)$", base)
+    if m:
+        head = m.group(1).strip().lower()
+        for k, names in GUIDE_HEADINGS.items():
+            if head in names:
+                return k, m.group(2)
+    return None, ""
+
+
+def _clean_item(key, s):
+    s = re.sub(r"[\x00-\x1f]", " ", s or "")
+    s = re.sub(r"\s+", " ", s).strip().strip(".;,").strip()
+    if len(s) < 2 or len(s) > 80 or re.match(r"(?i)^page \d+", s):
+        return None
+    if key == "allowed_contacts":
+        compact = re.sub(r"(?<=\d)[\s-](?=\d)", "", s)
+        ph = re.search(r"(?<!\d)(?:\+?91)?([6-9]\d{9})(?!\d)", compact)
+        if ph:
+            return ph.group(1)
+        em = re.search(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}", s)
+        return em.group(0).lower() if em else None
+    return s
+
+
+def _category_of(label):
+    t = label.lower()
+    if "penthouse" in t:
+        return "penthouse"
+    if re.search(r"row[\s-]?house", t):
+        return "row_house"
+    if "villa" in t:
+        return "villa"
+    if "bungalow" in t:
+        return "bungalow"
+    if "plot" in t:
+        return "plot"
+    if re.search(r"apartment|flat|\bbhk\b|\brk\b", t):
+        return "apartment"
+    return None
+
+
+def _project_key(line):
+    m = _KV.match(line)
+    if not m:
+        return None, ""
+    head = re.sub(r"\s+", " ", m.group(1)).strip().lower()
+    for k, names in PROJECT_KEYS.items():
+        if head in names:
+            return k, m.group(2).strip()
+    return None, ""
+
+
+def _unit_line(line):
+    """'2 BHK Apartment: Price 1.3 Cr; Carpet 720 sq ft; Bathrooms 2' -> (unit dict, skipped pieces), or None."""
+    m = _UNIT.match(line)
+    if not m:
+        return None
+    label = re.sub(r"\s+", " ", m.group(1)).strip()
+    cat = _category_of(label)
+    if not cat:
+        return None
+    bm = re.search(r"(\d)\s*bhk", label, re.I)
+    unit = {"label": label[:80], "category": cat, "bhk": int(bm.group(1)) if bm else None}
+    skipped = []
+    for piece in re.split(r"[;|]", m.group(2)):
+        p = piece.strip().strip(".")
+        if not p:
+            continue
+        low = p.lower()
+        mm = re.match(r"^price\s*[:\-]?\s*(.+)$", low)
+        if mm:
+            unit["price"] = p[mm.start(1):][:40]
+            continue
+        got = False
+        for key, pat in (("carpet_sqft", r"^carpet(?:\s+area)?\s*[:\-]?\s*([\d,\.]+)"),
+                         ("builtup_sqft", r"^built[\s-]?up(?:\s+area)?\s*[:\-]?\s*([\d,\.]+)"),
+                         ("plot_sqft", r"^plot(?:\s+area)?\s*[:\-]?\s*([\d,\.]+)"),
+                         ("bathrooms", r"^(?:bathrooms?|baths?)\s*[:\-]?\s*(\d+)"),
+                         ("bathrooms", r"^(\d+)\s*(?:bathrooms?|baths?)\b"),
+                         ("balconies", r"^(?:balconies|balcony)\s*[:\-]?\s*(\d+)"),
+                         ("balconies", r"^(\d+)\s*(?:balconies|balcony)\b"),
+                         ("parking", r"^parking(?:\s+spaces?)?\s*[:\-]?\s*(\d+)"),
+                         ("parking", r"^(\d+)\s*parking\b")):
+            mm = re.match(pat, low)
+            if mm:
+                unit[key] = mm.group(1).replace(",", "")
+                got = True
+                break
+        if got:
+            continue
+        for key, pat in (("facing", r"^facing\s*[:\-]?\s*(.+)$"), ("floor_range", r"^floors?(?:\s+range)?\s*[:\-]?\s*(.+)$"),
+                         ("dimensions", r"^dimensions?\s*[:\-]?\s*(.+)$"),
+                         ("permitted_use", r"^(?:permitted\s+use|use)\s*[:\-]?\s*(.+)$")):
+            mm = re.match(pat, low)
+            if mm:
+                unit[key] = p[mm.start(1):][:60]
+                got = True
+                break
+        if not got:
+            skipped.append(p[:60])
+    if "price" not in unit:
+        return None
+    return unit, skipped
+
+
+def _poss_norm(raw):
+    raw = (raw or "").strip()
+    m = re.fullmatch(r"(20\d\d)-(0[1-9]|1[0-2])", raw)
+    if m:
+        return raw
+    if re.search(r"[A-Za-z]{3}[a-z]*\s+20\d\d", raw):
+        return RE._parse_poss(raw)
+    return None
+
+
+def _is_project_line(line):
+    return bool(_PROJ_START.match(line) or _project_key(line)[0] or _unit_line(line))
+
+
+def parse_guide(text):
+    """Reads a brand guide made of plain headings (rules) and 'Project:' blocks (projects, prices, areas).
+    No guessing: only recognised lines are taken, unrecognised lines inside a project are listed, and the
+    builder confirms everything before it is saved."""
+    out = {k: [] for k in GUIDE_HEADINGS}
+    projects = []
+    curp = None
+
+    def add(key, raw):
+        v = _clean_item(key, raw)
+        if v and v.lower() not in [x.lower() for x in out[key]] and len(out[key]) < 100:
+            out[key].append(v)
+
+    cur = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        pm = _PROJ_START.match(line)
+        if pm:
+            curp = {"name": re.sub(r"\s+", " ", pm.group(1)).strip()[:120], "short": "", "city": "", "locality": "",
+                    "rera": "", "possession": "", "ready": "", "booking": "", "aliases": [], "units": [],
+                    "skipped": [], "notes": []}
+            if len(projects) < 20:
+                projects.append(curp)
+            cur = None
+            continue
+        key, inline = _heading_key(line)
+        if key:
+            cur, curp = key, None
+            for part in re.split(r"[;,]", inline):
+                add(cur, part)
+            continue
+        if curp is not None:
+            pk, val = _project_key(line)
+            if pk:
+                if pk == "aliases":
+                    curp["aliases"] += [a.strip()[:80] for a in re.split(r"[;,]", val) if a.strip()]
+                elif pk == "possession":
+                    norm = _poss_norm(val)
+                    if norm:
+                        curp["possession"] = norm
+                    else:
+                        curp["notes"].append(f'Possession "{val[:40]}" needs a month and year, for example December 2028.')
+                elif pk == "ready":
+                    v = val.strip().lower()
+                    if v in ("yes", "no"):
+                        curp["ready"] = v
+                    else:
+                        curp["notes"].append(f'Ready to move "{val[:20]}" must be yes or no.')
+                else:
+                    curp[pk] = val.strip()[:120]
+                continue
+            ul = _unit_line(line)
+            if ul:
+                unit, sk = ul
+                curp["units"].append(unit)
+                curp["skipped"] += [f'{unit["label"]}: {s}' for s in sk]
+                continue
+        unknown_heading = (line.endswith(":") and len(line) <= 60) or (line.isupper() and len(line) > 3)
+        if unknown_heading:
+            cur, curp = None, None
+            continue
+        if curp is not None:
+            if len(curp["skipped"]) < 8:
+                curp["skipped"].append(line[:90])
+            continue
+        if _is_project_line(line):
+            continue
+        if cur and (_BULLET.match(line) or len(line) <= 80):
+            for part in _BULLET.sub("", line).split(";"):
+                add(cur, part)
+    out["projects"] = projects
+    return out
+
+
+def _s(v, n=120):
+    return re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f]", " ", v)).strip()[:n] if isinstance(v, str) else ""
+
+
+def _norm_projects(raw):
+    """Rebuilds the project list from posted JSON, keeping only known text fields."""
+    out = []
+    for p in (raw if isinstance(raw, list) else [])[:20]:
+        if not isinstance(p, dict) or not _s(p.get("name")):
+            continue
+        pr = {k: _s(p.get(k)) for k in ("name", "short", "city", "locality", "rera", "possession", "ready", "booking")}
+        pr["aliases"] = [_s(a, 80) for a in (p.get("aliases") or [])[:20] if _s(a, 80)] if isinstance(p.get("aliases"), list) else []
+        pr["units"] = []
+        for un in (p.get("units") or [])[:30] if isinstance(p.get("units"), list) else []:
+            if not isinstance(un, dict) or un.get("category") not in RE.CATEGORIES or not _s(un.get("label"), 80):
+                continue
+            nu = {"label": _s(un.get("label"), 80), "category": un["category"],
+                  "bhk": un.get("bhk") if isinstance(un.get("bhk"), int) and 1 <= un["bhk"] <= 9 else None}
+            for k in ("price", "carpet_sqft", "builtup_sqft", "plot_sqft", "bathrooms", "balconies", "parking",
+                      "facing", "floor_range", "dimensions", "permitted_use"):
+                if _s(un.get(k), 60):
+                    nu[k] = _s(un.get(k), 60)
+            pr["units"].append(nu)
+        out.append(pr)
+    return out
+
+
+def _price_text(raw):
+    v = parse_price(raw or "")
+    return fmt_money(v) if v else "could not read"
+
+
+@app.get("/admin/guide", response_class=HTMLResponse)
+def guide_form(request: Request, err: str = ""):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    items_html = "".join("<li><b>" + e(GUIDE_LABEL[k]) + '</b> <span class="muted">(heading, for example: '
+                         + e(GUIDE_HEADINGS[k][0].title()) + ")</span></li>" for k in GUIDE_HEADINGS)
+    example = ("Project: Demo Lakeview\nCity: Pune\nLocality: Baner\nRERA: P44444444444\nPossession: June 2029\n"
+               "Ready to move: No\nBooking amount: 6 lakh\nOther names: Lakeview; Lake View\n"
+               "2 BHK Apartment: Price 1.05 Cr; Carpet 640 sq ft; Built-up 790 sq ft; Bathrooms 2; Balconies 2; Parking 1")
+    help_ = ('<p class="muted">BrandGuard reads two kinds of content, then shows you everything it found before anything is saved.</p>'
+             '<p style="margin-bottom:4px"><b>1. Rules</b> <span class="muted">(a heading, then one item per line)</span></p>'
+             "<ul style='margin:0 0 12px;padding-left:20px'>" + items_html + "</ul>"
+             '<p style="margin-bottom:4px"><b>2. Projects, prices and facts</b> <span class="muted">(one property type per line)</span></p>'
+             f'<pre class="mono" style="white-space:pre-wrap;background:#f7f9fc;border:1px solid var(--line);border-radius:7px;padding:12px;margin:0 0 8px">{e(example)}</pre>'
+             '<p class="muted" style="margin:0">Keep each property type on one line, not in a table. Property types can be Apartment, '
+             'Penthouse, Villa, Bungalow, Row house or Plot. Scanned images are not supported. A new project is not visible to '
+             'any partner until you grant access on the Project Access page.</p>')
+    form = ('<form method="post" action="/admin/guide/preview" enctype="multipart/form-data" data-lock>'
+            '<label for="gf">Brand guideline document (PDF or TXT)</label>'
+            '<input id="gf" type="file" name="file" accept=".pdf,.txt" required>'
+            '<p class="hint">Up to 10 MB. Nothing is saved until you confirm the list on the next screen.</p>'
+            f'<button class="btn" type="submit">{ui.icon("upload", 16)}Read document</button></form>')
+    body = (ui.page_header("Import from a Document",
+                           f"Upload your brand guide and BrandGuard turns it into rules, projects and approved prices for {e(load_reg(u).get('brand', ''))}.",
+                           '<a class="btn secondary" href="/admin/rules">Back to Brand Rules</a>')
+            + '<div class="stack">' + (ui.alert(e(err), "bad") if err else "")
+            + ui.card("Upload", form) + ui.card("What the document should look like", help_) + "</div>")
+    return page("Import", body, u, "rules", [("Brand Rules", "/admin/rules"), ("Import", None)], request)
+
+
+@app.post("/admin/guide/preview", response_class=HTMLResponse)
+def guide_preview(request: Request, file: UploadFile = File(...)):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    name = (file.filename or "document")[:120]
+    if not name.lower().endswith((".pdf", ".txt")):
+        return guide_form(request, err="Upload a PDF or a TXT file.")
+    data = file.file.read(10 * 1024 * 1024 + 1)
+    if len(data) > 10 * 1024 * 1024:
+        return guide_form(request, err="This file is larger than 10 MB.")
+    try:
+        found = parse_guide(pdf_text(data, name))
+    except Exception as ex_:
+        msg = str(ex_) if isinstance(ex_, ValueError) else "This file could not be read. Try exporting it as a PDF again."
+        return guide_form(request, err=msg)
+    reg = load_reg(u)
+    projects = [p for p in found["projects"] if p["units"] or p["city"] or p["rera"] or p["possession"] or p["booking"]]
+    total = sum(len(found[k]) for k in GUIDE_HEADINGS) + len(projects)
+    if not total:
+        return guide_form(request, err="Nothing was found. Check that the document has headings such as "
+                                       "\"Banned phrases\", or blocks that start with \"Project: Name\", with the details on separate lines.")
+    cards = []
+    for key in GUIDE_HEADINGS:
+        items = found[key]
+        if not items:
+            continue
+        have = [x.lower() for x in reg.get(key, [])]
+        boxes = ""
+        for it in items:
+            dup = it.lower() in have
+            state = " disabled" if dup else " checked"
+            note = ' <span class="muted">(already in your rules)</span>' if dup else ""
+            boxes += (f'<label class="check"><input type="checkbox" name="{key}" value="{e(it)}"{state}> '
+                      f'{e(it)}{note}</label>')
+        cards.append(ui.card(f"{GUIDE_LABEL[key]} ({len(items)} found)", boxes))
+    existing = {p["official_name"].lower(): p for p in RE.brand_projects(u["brand_id"], active_only=False)}
+    for i, p in enumerate(projects):
+        ex_p = existing.get(p["name"].lower())
+        state = ui.badge("Already exists: values will be updated", "info", "info") if ex_p else ui.badge("New project", "ok", "plus")
+        det = [("City", p["city"]), ("Locality", p["locality"]), ("RERA number", p["rera"]),
+               ("Possession", p["possession"]), ("Ready to move", p["ready"]),
+               ("Booking amount", _price_text(p["booking"]) if p["booking"] else ""),
+               ("Other names", ", ".join(p["aliases"]))]
+        dl = "".join(f"<dt>{e(k)}</dt><dd>{e(v)}</dd>" for k, v in det if v)
+        rows = []
+        for un in p["units"]:
+            rows.append([e(un["label"]), e(RE.CATEGORIES[un["category"]][0]),
+                         f'{e(un["price"])}<br><span class="muted">reads as {e(_price_text(un["price"]))}</span>',
+                         e(un.get("carpet_sqft") or un.get("plot_sqft") or "-"), e(un.get("builtup_sqft") or "-"),
+                         e(un.get("bathrooms") or "-"), e(un.get("balconies") or "-"), e(un.get("parking") or "-")])
+        tbl = (ui.table(["Property type", "Category", "Price", "Carpet / plot sq ft", "Built-up sq ft", "Bathrooms", "Balconies", "Parking"],
+                        rows, "Property types in " + p["name"]) if rows else ui.empty("No property types found for this project"))
+        warn = ""
+        if p["notes"] or p["skipped"]:
+            lines_ = "".join(f"<li>{e(x)}</li>" for x in (p["notes"] + p["skipped"])[:12])
+            warn = ui.alert("<b>Not understood, so skipped:</b><ul style='margin:6px 0 0;padding-left:18px'>" + lines_ + "</ul>", "warn")
+        pick = (f'<label class="check"><input type="checkbox" name="proj" value="{i}" checked> '
+                f'<b>Add this project and its prices</b></label>')
+        cards.append(ui.card(p["name"], f'<p>{state}</p>{pick}<dl class="kv" style="margin:10px 0 14px">{dl}</dl>{tbl}{warn}',
+                             "Check that each price reads as the amount you expect (lakh versus crore)."))
+    payload = e(json.dumps(projects, ensure_ascii=False))
+    form = (f'<form method="post" action="/admin/guide/apply" data-lock><input type="hidden" name="title" value="{e(name)}">'
+            f'<input type="hidden" name="payload" value="{payload}">'
+            + "".join(cards)
+            + f'<div class="form-actions" style="margin-top:16px"><button class="btn" type="submit">{ui.icon("check", 16)}Save selected</button>'
+              '<a class="btn secondary" href="/admin/guide">Cancel</a></div></form>')
+    body = (ui.page_header("Check what was found", f"From {e(name)}. Untick anything that should not be saved.")
+            + '<div class="stack">' + ui.alert("Nothing is saved yet. Rules and prices apply to new submissions only. "
+                                                "Changing an approved price creates a new version and flags earlier approvals for re-check.", "info")
+            + form + "</div>")
+    return page("Import", body, u, "rules", [("Brand Rules", "/admin/rules"), ("Import", None)], request)
+
+
+def _import_fact(u, p, key, uid, raw, title, stats, warns, label):
+    """Saves one fact. Unchanged values are skipped, so re-importing never creates empty versions."""
+    try:
+        num, txt = parse_fact_value(key, raw)
+        state, cur, _d = RE.resolve_fact(p["id"], key, uid)
+        if state == "ok" and cur is not None:
+            same = (abs((cur["value_num"] or 0) - num) < 1e-6) if num is not None else (cur["value_text"] == txt)
+            if same:
+                stats["unchanged"] += 1
+                return
+        _save_fact(u, p, key, uid, raw, title, "Imported from brand guide", "", "")
+        stats["facts"] += 1
+    except ValueError as ex_:
+        warns.append(f"{label}: {RE.FACT_LABEL.get(key, key)} not saved. {ex_}")
+
+
+def _import_project(u, pr, title, stats, warns):
+    existing = next((p for p in RE.brand_projects(u["brand_id"], active_only=False)
+                     if p["official_name"].lower() == pr["name"].lower()), None)
+    if existing:
+        pid = existing["id"]
+        ex("UPDATE projects SET city=?, locality=?, short_name=? WHERE id=?",
+           (pr["city"] or existing["city"], pr["locality"] or existing["locality"], pr["short"] or existing["short_name"], pid))
+    else:
+        pid = RE.add_project(u["brand_id"], pr["name"], pr["short"], pr["city"], pr["locality"], "", [], u["name"])
+        log(None, u["name"], "PROJECT_ADDED", pr["name"] + " (from brand guide)", u["brand_id"])
+        stats["projects"] += 1
+    p = RE.get_project(pid)
+    changed_before = stats["facts"] + stats["units"]
+    if pr["rera"]:
+        r = pr["rera"].strip().upper()
+        if not RE.rera_format_ok(r):
+            warns.append(f'{pr["name"]}: RERA number "{pr["rera"]}" was skipped. It should look like P followed by 11 digits.')
+        elif r != (p["rera_no"] or ""):
+            ex("UPDATE projects SET rera_no=?, rera_level='format', rera_source=NULL, rera_checked_at=NULL, rera_checked_by=NULL WHERE id=?", (r, pid))
+    have = [a.lower() for a in RE.aliases_of(pid)]
+    for a in pr["aliases"]:
+        if a.lower() not in have:
+            ex("INSERT INTO project_aliases (project_id, alias) VALUES (?,?)", (pid, a))
+            have.append(a.lower())
+    p = RE.get_project(pid)
+    for key, field in (("possession", pr["possession"]), ("ready_to_move", pr["ready"]), ("booking_amount", pr["booking"])):
+        if field:
+            _import_fact(u, p, key, None, field, title, stats, warns, pr["name"])
+    for un in pr["units"]:
+        match = None
+        for ut in RE.unit_types(pid, active_only=False):
+            if (un["bhk"] is not None and ut["category"] == un["category"] and ut["bhk"] == un["bhk"]) \
+                    or ut["label"].lower() == un["label"].lower():
+                match = ut
+                break
+        try:
+            if not parse_fact_value("price", un["price"])[0]:
+                raise ValueError("Enter a price greater than zero.")
+        except ValueError as ex_:
+            warns.append(f'{pr["name"]} {un["label"]}: skipped. The price could not be read. {ex_}')
+            continue
+        if match:
+            uid = match["id"]
+        else:
+            bhk = un["bhk"] if "bhk" in RE.CATEGORIES[un["category"]][1] else None
+            uid = RE.add_unit_type(pid, un["category"], un["label"], bhk)
+            stats["units"] += 1
+        label = f'{pr["name"]} {un["label"]}'
+        _import_fact(u, p, "price", uid, un["price"], title, stats, warns, label)
+        for key in ("carpet_sqft", "builtup_sqft", "plot_sqft", "bathrooms", "balconies", "parking",
+                    "facing", "floor_range", "dimensions", "permitted_use"):
+            if un.get(key):
+                _import_fact(u, p, key, uid, un[key], title, stats, warns, label)
+    if existing and stats["facts"] + stats["units"] > changed_before:
+        stats["updated"] += 1
+    log(None, u["name"], "PROJECT_EDITED", f'{pr["name"]}: details imported from brand guide', u["brand_id"])
+
+
+@app.post("/admin/guide/apply")
+async def guide_apply(request: Request):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    f = await request.form()
+    reg = load_reg(u)
+    added = {}
+    for key in GUIDE_HEADINGS:
+        cur = reg.setdefault(key, [])
+        have = [x.lower() for x in cur]
+        for raw in f.getlist(key)[:100]:
+            v = _clean_item(key, raw)
+            if v and v.lower() not in have:
+                cur.append(v)
+                have.append(v.lower())
+                added[key] = added.get(key, 0) + 1
+    title = (f.get("title") or "document")[:120]
+    stats = {"projects": 0, "updated": 0, "units": 0, "facts": 0, "unchanged": 0}
+    warns = []
+    chosen = [int(i) for i in f.getlist("proj") if str(i).isdigit()]
+    try:
+        projects = _norm_projects(json.loads((f.get("payload") or "[]")[:300000]))
+    except ValueError:
+        projects = []
+    source_title = "Brand guide: " + title
+    for i in chosen:
+        if 0 <= i < len(projects):
+            _import_project(u, projects[i], source_title, stats, warns)
+    if not added and not (stats["projects"] or stats["updated"] or stats["facts"] or stats["units"]):
+        request.session["flash"] = ("Nothing new to save. " + (warns[0] if warns else "Everything selected already matched."))
+        return RedirectResponse("/admin/rules", 303)
+    if added:
+        save_reg(u, reg)
+    RE.add_source(u["brand_id"], source_title, "brand_guide", "official", u["name"])
+    parts = [f"{n} {GUIDE_LABEL[k].lower()}" for k, n in added.items()]
+    if stats["projects"]:
+        parts.append(f'{stats["projects"]} new project(s)')
+    if stats["updated"]:
+        parts.append(f'{stats["updated"]} existing project(s) updated')
+    if stats["units"]:
+        parts.append(f'{stats["units"]} property type(s)')
+    if stats["facts"]:
+        parts.append(f'{stats["facts"]} approved fact(s) saved')
+    log(None, u["name"], "RULES_IMPORTED", f"{title}: " + ", ".join(parts), u["brand_id"])
+    msg = "Imported: " + ", ".join(parts) + "."
+    if stats["unchanged"]:
+        msg += f' {stats["unchanged"]} value(s) were already up to date.'
+    if warns:
+        msg += f' {len(warns)} item(s) skipped: ' + warns[0]
+    request.session["flash"] = msg[:400]
+    return RedirectResponse("/admin/projects" if (stats["projects"] or stats["updated"]) else "/admin/rules", 303)
+
+
+# ============================================================ test audio for judges (public, no sign-in)
+AUDIO_DIR = Path(__file__).resolve().parent / "demo_audio"
+AUDIO_EXT = (".m4a", ".mp3", ".wav", ".mp4", ".ogg", ".aac", ".webm")
+TEST_CLIPS = [
+    {"key": "approval", "n": 1, "title": "Approval", "tone": "ok",
+     "say": "Demo Heights in Wakad, Pune. A 2 BHK home at 1 crore 30 lakh. Carpet area 720 square feet, with 2 bathrooms. "
+            "Possession in December 2028.",
+     "result": "Auto-Approved. The price, carpet area, bathrooms and possession all match the approved facts, so an "
+               "approval ID is issued with no human needed.",
+     "steps": ["Download the audio below.", "Click Enter as Freelancer on the home page.",
+               "Open Submit a Reel, choose Demo Developer, and upload the file.",
+               "The result page opens. Look at the Claim-by-claim checks table: each spoken claim is matched to an approved fact."]},
+    {"key": "rejection", "n": 2, "title": "Rejection", "tone": "bad",
+     "say": "Demo Heights in Wakad. 2 BHK for 1 crore 30 lakh. Guaranteed returns, the price will double in two years. "
+            "Last chance!",
+     "result": "Rejected. The price is correct, but \"guaranteed returns\" and \"price will double\" are banned phrases "
+               "(\"last chance\" is also flagged if the sample brand guide has been imported). Each finding shows the "
+               "exact second it was spoken, why it matters and what to change.",
+     "steps": ["Download the audio below.", "Enter as Freelancer and open Submit a Reel.",
+               "Choose Demo Developer and upload the file.",
+               "Read the findings on the result page. The creator is told exactly what to fix."]},
+    {"key": "dispute", "n": 3, "title": "Dispute", "tone": "warn",
+     "say": "Demo Heights, Wakad. 3 BHK flats available at 1 crore 50 lakh. Possession in December 2028.",
+     "result": "Rejected, because 3 BHK is approved at 1 crore 90 lakh, not 1 crore 50 lakh. You then dispute it and "
+               "play the builder to resolve it. This shows that a person always has the final word.",
+     "steps": ["Download the audio below, then Enter as Freelancer, open Submit a Reel, choose Demo Developer and upload it.",
+               "The submission is Rejected for a price mismatch. Click Raise a dispute.",
+               "Write why the finding is wrong (for example: \"I quoted the offer price for a limited floor\"). "
+               "Optionally type what you actually said. Click Submit dispute. The status becomes Disputed.",
+               "In the sidebar, switch the demo role to Builder. Open Review Queue, then open the disputed submission.",
+               "The builder sees the evidence and the creator's explanation. Click Overturn decision to approve it "
+               "(an approval ID is issued), or Uphold rejection to keep it rejected (a reason is required).",
+               "Switch back to Freelancer to see the outcome on the submission, and open Audit Trail as Builder to see "
+               "every step recorded with who did it and when."]},
+]
+
+
+def _clip_file(key):
+    for ext in AUDIO_EXT:
+        p = AUDIO_DIR / f"{key}{ext}"
+        if p.is_file():
+            return p
+    return None
+
+
+@app.get("/test-audio", response_class=HTMLResponse)
+def test_audio_page(request: Request):
+    u = me(request)
+    cards = []
+    for c in TEST_CLIPS:
+        f = _clip_file(c["key"])
+        if f:
+            media = (f'<audio controls preload="none" style="width:100%;margin:8px 0 12px" src="/test-audio/file/{c["key"]}?inline=1">'
+                     f'Your browser cannot play audio.</audio>'
+                     f'<a class="btn" href="/test-audio/file/{c["key"]}" download>{ui.icon("upload", 16)}Download {e(c["title"])} audio</a>')
+        else:
+            media = ui.alert("This audio file has not been added yet.", "warn")
+        steps = "".join(f"<li>{e(s)}</li>" for s in c["steps"])
+        inner = (f'<p class="muted" style="margin-bottom:4px">What is said in the clip</p>'
+                 f'<p style="margin-top:0"><i>"{e(c["say"])}"</i></p>{media}'
+                 f'<h3 class="sec-title">What to do</h3><ol style="margin:0 0 12px;padding-left:20px">{steps}</ol>'
+                 f'<h3 class="sec-title">What you should see</h3><p style="margin:0">{e(c["result"])}</p>')
+        cards.append(ui.card(f'{c["n"]}. {c["title"]} audio', inner, cls=""))
+    guide = AUDIO_DIR / "Demo_Developer_Brand_Guide.pdf"
+    extra = ""
+    if guide.is_file():
+        extra = ui.card("Optional: sample brand guide",
+                        '<p class="muted">As Builder, open Brand Rules and click Import from PDF, then upload this file. '
+                        'BrandGuard lists the rules it found, you confirm them, and they apply to new submissions straight away.</p>'
+                        '<a class="btn secondary" href="/test-audio/file/guide" download>Download sample brand guide (PDF)</a>')
+    start = ('<a class="btn" href="/enter/freelancer">Enter as Freelancer</a> '
+             '<a class="btn secondary" href="/enter/admin">Enter as Builder</a>') if not u else ""
+    body = (ui.page_header("Test Audio for Judges",
+                           "Three short clips to test the main workflow: one approved, one rejected, one disputed. "
+                           "No sign-up is needed. Use the demo roles in the sidebar or the buttons below.", start)
+            + '<div class="stack">' + "".join(cards) + extra
+            + ui.alert("These recordings are made for this demo. The company, projects and prices are fictional.", "info") + "</div>")
+    if u:
+        return page("Test Audio", body, u, "testaudio", [("Test Audio", None)], request)
+    return page("Test Audio", body)
+
+
+@app.get("/test-audio/file/{key}")
+def test_audio_file(key: str, inline: int = 0):
+    if key == "guide":
+        p = AUDIO_DIR / "Demo_Developer_Brand_Guide.pdf"
+        name = "Demo_Developer_Brand_Guide.pdf"
+    else:
+        clip = next((c for c in TEST_CLIPS if c["key"] == key), None)
+        p = _clip_file(key) if clip else None
+        name = f'BrandGuard_Test_{clip["n"]}_{clip["title"]}{p.suffix}' if p else ""
+    if not p or not p.is_file():
+        return HTMLResponse("File not found.", status_code=404)
+    return FileResponse(str(p), filename=name, content_disposition_type="inline" if inline else "attachment")

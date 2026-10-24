@@ -10,3 +10,7 @@ __pycache__/
 .env
 groq_key.txt
  
+
+# demo clips for the judges page must be committed; the audio rules above would hide them
+!demo_audio/
+!demo_audio/*

@@ -61,9 +61,11 @@ NAV_ADMIN = [
     ("facts", "/admin/projects", "Projects and Facts", "tag"),
     ("access", "/admin/access", "Project Access", "users"),
     ("disputes", "/disputes", "Disputes", "scale"),
+    ("learned", "/admin/learned", "Learned Cases", "history"),
     ("approvals", "/approvals", "Approval Records", "badge-check"),
     ("audit", "/audit", "Audit Trail", "history"),
     ("verify", "/verify", "Verify a File", "file-check"),
+    ("testaudio", "/test-audio", "Test Audio", "play"),
 ]
 NAV_SUB = [
     ("overview", "/", "My Dashboard", "home"),
@@ -72,6 +74,7 @@ NAV_SUB = [
     ("disputes", "/disputes", "Disputes", "scale"),
     ("verify", "/verify", "Verify a File", "file-check"),
     ("help", "/help", "Help and Guidelines", "help"),
+    ("testaudio", "/test-audio", "Test Audio", "play"),
 ]
 
 # ------------------------------------------------------------------- statuses
@@ -308,6 +311,7 @@ table.data{width:100%;border-collapse:collapse;font-size:14px;background:#fff}
 table.data th{background:#f7f9fc;color:var(--text-2);font-size:12.5px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
 table.data td:first-child{white-space:nowrap}
 table.data td{padding:12px 14px;border-bottom:1px solid var(--line-2);vertical-align:top;overflow-wrap:anywhere}
+table.data td .btn{white-space:nowrap}
 table.data tr:last-child td{border-bottom:0}
 table.data tbody tr:hover{background:#fafbfd}
 .trunc{display:block;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

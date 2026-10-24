@@ -836,19 +836,20 @@ def validate(texts_by_project, projects_all, threshold):
     return claims, list(uniq.values())
 
 
-def assign_segments(segs, caption_parts, idres, projects):
+def assign_segments(segs, caption_parts, idres, projects, screen=None):
     """Decide which project each piece of text is about. Returns {project_id: [(src, t, conf, text)]} and unassigned."""
     ids = idres["project_ids"]
     out = {pid: [] for pid in ids}
     unassigned = []
     items = [("audio", s["start"], s.get("conf", 1.0), s["text"], i) for i, s in enumerate(segs)]
     items += [("caption", 0, 1.0, c, i) for i, c in enumerate(caption_parts)]
+    items += [("screen", l["start"], l.get("conf", 1.0), l["text"], i) for i, l in enumerate(screen or [])]
     if len(ids) == 1:
         for src, t, conf, text, _i in items:
             out[ids[0]].append((src, t, conf, text))
         return out, unassigned
     pmap = {p["id"]: p for p in projects}
-    current = {"audio": None, "caption": None}
+    current = {"audio": None, "caption": None, "screen": None}
     for src, t, conf, text, i in items:
         f = _fold(text)
         named = [pid for pid in ids if pid in pmap and any(_contains(f, _fold(n)) for n in names_of(pmap[pid]))]
@@ -961,8 +962,8 @@ def _seed_demo_developer(brand_id):
     heights = next((p for p in brand_projects(brand_id) if p["official_name"] == "Demo Heights"), None)
     if heights:
         _ex("UPDATE projects SET city='Pune', locality='Wakad', short_name='Heights' WHERE id=?", (heights["id"],))
-        _ex("INSERT INTO project_aliases (project_id, alias) VALUES (?,?)", (heights["id"], "डेमो हाइट्स"))
-        _ex("INSERT INTO project_aliases (project_id, alias) VALUES (?,?)", (heights["id"], "डेमो हाईट्स"))
+        for _a in ("डेमो हाइट्स", "डेमो हाईट्स", "Demo Hights", "Demo Hites", "Demo Heidts", "Demo Hytes"):
+            _ex("INSERT INTO project_aliases (project_id, alias) VALUES (?,?)", (heights["id"], _a))
         for u in unit_types(heights["id"]):
             if u["bhk"] == 2:
                 for k, v in (("carpet_sqft", 720), ("builtup_sqft", 860), ("bathrooms", 2), ("balconies", 1), ("parking", 1)):

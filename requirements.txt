@@ -4,3 +4,4 @@ python-multipart
 requests
 itsdangerous
 yt-dlp
+pypdf
