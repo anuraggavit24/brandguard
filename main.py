@@ -31,6 +31,7 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "brandguard.db"
 GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
 MODE = os.environ.get("TRANSCRIBE_MODE", "groq")  # groq | local
+LINKS_ENABLED = os.environ.get("LINKS_ENABLED", "1") == "1"
 MAX_MB = 60
 MAX_SECONDS = 180
 THRESHOLD = 0.65
@@ -278,15 +279,8 @@ def submitter_dash(u):
     langs = ('<option value="mr">Marathi</option><option value="hi">Hindi</option>'
              '<option value="en">English</option><option value="auto">Auto-detect</option>')
     busy = "var b=this.querySelector('button');b.disabled=true;b.textContent='Reviewing... this can take 10-40 seconds';"
-    body = f"""
-    <div class="card"><h2>Upload a reel</h2>
-    <form method="post" action="/upload" enctype="multipart/form-data" onsubmit="{busy}">
-      <label>Company</label><select name="brand_id">{opts}</select>
-      <label>Spoken language</label><select name="language">{langs}</select>
-      <label>Video or audio file (up to {MAX_MB} MB, first {MAX_SECONDS // 60} minutes are reviewed)</label>
-      <input type="file" name="file" accept="video/*,audio/*" required>
-      <button type="submit">Submit for review</button>
-    </form></div>
+    if LINKS_ENABLED:
+        link_card = f"""
     <div class="card"><h2>Or check a link</h2>
     <p class="muted">Paste a public YouTube Shorts, Instagram reel or Facebook reel link. This is a live-content
     check of something already posted. Both the audio and the post's title and description are reviewed.
@@ -297,7 +291,25 @@ def submitter_dash(u):
       <label>Spoken language</label><select name="language">{langs}</select>
       <label>Link</label><input type="url" name="url" placeholder="https://www.youtube.com/shorts/..." required>
       <button type="submit">Fetch and review</button>
+    </form></div>"""
+    else:
+        link_card = """
+    <div class="card"><h2>Check a posted link</h2>
+    <p class="muted">BrandGuard can fetch a public YouTube, Instagram or Facebook reel from its link and review it,
+    including the post's title and description. This hosted demo runs on a shared cloud server, which these
+    platforms block from automated downloads, so link checking is switched off here. It works in the local
+    build, and production would use each platform's official API with the account owner's consent.
+    To check a posted reel on this demo, download it and upload the file above.</p></div>"""
+    body = f"""
+    <div class="card"><h2>Upload a reel</h2>
+    <form method="post" action="/upload" enctype="multipart/form-data" onsubmit="{busy}">
+      <label>Company</label><select name="brand_id">{opts}</select>
+      <label>Spoken language</label><select name="language">{langs}</select>
+      <label>Video or audio file (up to {MAX_MB} MB, first {MAX_SECONDS // 60} minutes are reviewed)</label>
+      <input type="file" name="file" accept="video/*,audio/*" required>
+      <button type="submit">Submit for review</button>
     </form></div>
+    {link_card}
     <div class="card"><h2>My submissions</h2>{sub_table(mine, show_user=False)}</div>"""
     return page("Dashboard", body, u)
 
