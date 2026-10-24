@@ -1,0 +1,46 @@
+{
+  "brand": "Demo Developer",
+  "project": "Demo Heights",
+  "rera": "P00000000000",
+  "configs": [
+    {
+      "name": "2 BHK",
+      "price": 13000000
+    },
+    {
+      "name": "3 BHK",
+      "price": 19000000
+    }
+  ],
+  "possession": "December 2028",
+  "banned_phrases": [
+    "guaranteed returns",
+    "best in city",
+    "price will double",
+    "100% safe",
+    "no hidden charges"
+  ],
+  "confidential": [
+    "dealer commission",
+    "internal discount",
+    "unreleased project",
+    "margin slab"
+  ],
+  "allowed_contacts": [
+    "9999999999"
+  ],
+  "glossary": [
+    "Demo Heights",
+    "RERA",
+    "BHK",
+    "possession",
+    "crore",
+    "lakh",
+    "दीड कोटी",
+    "सव्वा कोटी",
+    "साडे तीन कोटी",
+    "डेढ़ करोड़",
+    "कोटी",
+    "ताबा"
+  ]
+}

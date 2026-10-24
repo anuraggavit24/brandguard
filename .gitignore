@@ -1,0 +1,10 @@
+.venv/
+data/
+submissions/
+__pycache__/
+*.wav
+*.mp4
+*.mov
+*.m4a
+*.mp3
+.env
