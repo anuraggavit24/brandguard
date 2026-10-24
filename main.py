@@ -265,6 +265,14 @@ def health():
     return {"ok": True}
 
 
+@app.get("/ocr-status")
+def ocr_status():
+    import shutil
+    return {"ocr_available": OCR.available(), "tesseract": OCR.TESSERACT,
+            "ffmpeg": shutil.which("ffmpeg"), "ffprobe": shutil.which("ffprobe"),
+            "fps": OCR.OCR_FPS, "budget": OCR.OCR_BUDGET}
+
+
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
     u = me(request)
