@@ -21,7 +21,9 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
+import accounts as ACC
 import learning as LRN
+import mailer
 import ocr as OCR
 import realestate as RE
 import ui
@@ -142,6 +144,7 @@ init_db()
 RE.setup(DB_PATH)
 RE.seed_if_empty()
 LRN.setup(DB_PATH)
+ACC.setup(DB_PATH)
 
 
 def log(sid, actor, action, note="", brand_id=None):
@@ -206,8 +209,8 @@ def page(title, body, user=None, active="", crumbs=None, request=None):
     else:
         queue_n = q("SELECT COUNT(*) AS c FROM submissions WHERE brand_id=? AND status IN ('SUPERVISION','DISPUTED')",
                     (user["brand_id"],))[0]["c"]
-    demo = [(k, lbl, DEMO[k] == user["id"]) for k, lbl in
-            (("admin", "Builder"), ("partner", "Channel Partner"), ("fvideoancer", "Fvideoancer"))]
+    demo = [] if user["pw_hash"] else [(k, lbl, DEMO[k] == user["id"]) for k, lbl in
+                                       (("admin", "Builder"), ("partner", "Channel Partner"), ("fvideoancer", "Fvideoancer"))]
     return HTMLResponse(ui.shell(title, body, user, ROLE_LABEL[user["role"]], active, crumbs,
                                  queue_n, company, flash, demo))
 
@@ -304,7 +307,15 @@ def home(request: Request):
         <p class="page-desc">BrandGuard listens to a marketing video in Marathi, Hindi or English, checks every price
         and claim against the brand's approved facts, and sends anything uncertain to a person. Nothing is approved
         without a recorded decision.</p></div>
-        <p class="sec-title">Choose a demo role to enter</p>
+        <div class="cols-2" style="margin-bottom:28px">
+          <div class="card role-card"><span class="ic-lg">{ui.icon("building", 22)}</span><h2>Set up your company</h2>
+            <p class="muted">Create a company account, add your brand rules and projects, then invite channel partners, freelancers and agencies.</p>
+            <a class="btn" href="/signup">Create company account{ui.icon("arrow-right", 16)}</a></div>
+          <div class="card role-card"><span class="ic-lg">{ui.icon("users", 22)}</span><h2>Sign in</h2>
+            <p class="muted">Already have an account, or an invite link from a company? Sign in or open the link you were sent.</p>
+            <a class="btn secondary" href="/login">Sign in{ui.icon("arrow-right", 16)}</a></div>
+        </div>
+        <p class="sec-title">Or try the demo with a ready-made role</p>
         <div class="cols-3">
           {role("admin", "shield", "Builder / Brand Manager",
                 "Set brand rules and approved facts, review flagged and disputed items, then approve or reject.",
@@ -315,7 +326,7 @@ def home(request: Request):
                 "Works with two companies under one login and switches between them.", "Enter as Fvideoancer")}
         </div>
         <p style="margin-top:20px"><a class="btn secondary" href="/test-audio">Judges: demo files to download</a></p>
-        <p class="muted" style="margin-top:12px">This is a demo. No sign-up is needed and the roles are not real accounts.</p>"""
+        <p class="muted" style="margin-top:12px">The demo roles are shared sample accounts with fictional data. Real accounts are separate.</p>"""
         return page("Welcome", body)
     return admin_dash(request, u) if u["role"] == "admin" else submitter_dash(request, u)
 
@@ -1050,7 +1061,8 @@ ACTION_LABEL = {
     "PRICE_SAVED": "Approved price saved", "PRICE_REMOVED": "Approved price removed",
     "RULES_IMPORTED": "Brand rules imported from document",
     "LESSON_LEARNED": "Lesson written from dispute", "LESSON_APPLIED": "Earlier decision applied",
-    "LESSON_CHANGED": "Lesson changed",
+    "LESSON_CHANGED": "Lesson changed", "COMPANY_CREATED": "Company created", "INVITE_CREATED": "Invite created",
+    "INVITE_ACCEPTED": "Invite accepted", "INVITE_CANCELLED": "Invite cancelled", "MEMBER_REMOVED": "Member removed",
 }
 DECISION_TEXT = {
     "AUTO_APPROVED": ("ok", "check-circle", "Every price matched the approved facts and nothing needed a person to check."),
@@ -2393,6 +2405,229 @@ def access_revoke(request: Request, grant_id: int = Form(0)):
         log(None, u["name"], "ACCESS_REVOKED", f"grant {grant_id}", u["brand_id"])
         request.session["flash"] = "Access removed. It takes effect immediately."
     return RedirectResponse("/admin/access", 303)
+
+
+# ============================================================ accounts, sign-in and invites
+def client_ip(request):
+    fwd = request.headers.get("x-forwarded-for", "")
+    return (fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else ""))
+
+
+def public_base(request):
+    base = os.environ.get("PUBLIC_URL", "").rstrip("/")
+    if base:
+        return base
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    return f"{proto}://{request.headers.get('host', request.url.netloc)}"
+
+
+def start_session(request, user_id):
+    request.session.clear()          # a fresh session on every sign-in
+    request.session["uid"] = user_id
+
+
+def auth_form(title, intro, fields, action, button, error="", extra=""):
+    inputs = "".join(
+        f'<div><label for="f-{n}">{e(lbl)}</label><input id="f-{n}" name="{n}" type="{t}" value="{e(v)}" '
+        f'{"required " if req else ""}autocomplete="{ac}"></div>' for n, lbl, t, v, req, ac in fields)
+    alert = ui.alert(e(error), "bad", "Could not continue.") if error else ""
+    return (f'<div style="max-width:460px;margin:0 auto"><h1>{e(title)}</h1><p class="page-desc">{intro}</p>{alert}'
+            f'<form method="post" action="{action}" data-lock class="stack">{inputs}'
+            f'<button class="btn" type="submit">{e(button)}</button></form>{extra}</div>')
+
+
+@app.get("/signup", response_class=HTMLResponse)
+def signup_form(request: Request):
+    if me(request):
+        return RedirectResponse("/", 303)
+    return page("Create company", auth_form(
+        "Set up your company", "You become the builder for this company. You can invite everyone else afterwards.",
+        [("company", "Company name", "text", "", True, "organization"), ("name", "Your name", "text", "", True, "name"),
+         ("email", "Work email", "email", "", True, "email"),
+         ("password", f"Password (at least {ACC.MIN_PASSWORD} characters)", "password", "", True, "new-password")],
+        "/signup", "Create company",
+        extra='<p class="muted" style="margin-top:14px">Already have an account? <a href="/login">Sign in</a></p>'))
+
+
+@app.post("/signup")
+def signup(request: Request, company: str = Form(""), name: str = Form(""), email: str = Form(""),
+           password: str = Form("")):
+    try:
+        uid, bid = ACC.create_company(company, name, email, password)
+    except ValueError as ex_:
+        return page("Create company", auth_form(
+            "Set up your company", "You become the builder for this company.",
+            [("company", "Company name", "text", company, True, "organization"), ("name", "Your name", "text", name, True, "name"),
+             ("email", "Work email", "email", email, True, "email"),
+             ("password", f"Password (at least {ACC.MIN_PASSWORD} characters)", "password", "", True, "new-password")],
+            "/signup", "Create company", str(ex_)))
+    start_session(request, uid)
+    log(None, name.strip(), "COMPANY_CREATED", f"Company created: {company.strip()}", bid)
+    request.session["flash"] = "Company created. Add your first project, then invite your team."
+    return RedirectResponse("/admin/projects", 303)
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_form(request: Request):
+    if me(request):
+        return RedirectResponse("/", 303)
+    return page("Sign in", auth_form(
+        "Sign in", "Use the email and password you registered with.",
+        [("email", "Email", "email", "", True, "email"), ("password", "Password", "password", "", True, "current-password")],
+        "/login", "Sign in",
+        extra='<p class="muted" style="margin-top:14px">New here? <a href="/signup">Create a company account</a>. '
+              'Invited by a company? Open the link in your invite email.</p>'))
+
+
+@app.post("/login")
+def login(request: Request, email: str = Form(""), password: str = Form("")):
+    try:
+        user = ACC.authenticate(email, password, client_ip(request))
+        err = "" if user else "Wrong email or password."
+    except ValueError as ex_:
+        user, err = None, str(ex_)
+    if not user:
+        return page("Sign in", auth_form(
+            "Sign in", "Use the email and password you registered with.",
+            [("email", "Email", "email", email, True, "email"), ("password", "Password", "password", "", True, "current-password")],
+            "/login", "Sign in", err))
+    start_session(request, user["id"])
+    return RedirectResponse("/", 303)
+
+
+@app.get("/invite/{token}", response_class=HTMLResponse)
+def invite_form(request: Request, token: str):
+    inv = ACC.get_invite(token)
+    if not inv:
+        return page("Invite", ui.alert("This invite link is not valid any more. It may have been used or have expired. "
+                                       "Ask the company to send a new one.", "bad", "Invite not valid."))
+    return page("Join " + inv["company"], invite_html(inv, token))
+
+
+def invite_html(inv, token, error=""):
+    label = ACC.KINDS[inv["kind"]][0]
+    existing = bool(q("SELECT 1 FROM users WHERE lower(email)=?", (inv["email"],)))
+    fields = ([] if existing else [("name", "Your name", "text", "", True, "name")]) + [
+        ("password", "Your password" if existing else f"Choose a password (at least {ACC.MIN_PASSWORD} characters)",
+         "password", "", True, "current-password" if existing else "new-password")]
+    intro = (f"{e(inv['company'])} has invited <b>{e(inv['email'])}</b> as <b>{e(label)}</b>. "
+             + ("This email already has an account. Enter its password to join." if existing else "Create your account to join."))
+    return auth_form("Join " + inv["company"], intro, fields, f"/invite/{e(token)}", "Join company", error)
+
+
+@app.post("/invite/{token}")
+def invite_accept(request: Request, token: str, name: str = Form(""), password: str = Form("")):
+    inv = ACC.get_invite(token)
+    if not inv:
+        return page("Invite", ui.alert("This invite link is not valid any more.", "bad", "Invite not valid."))
+    if ACC.too_many_attempts(inv["email"], client_ip(request)):
+        return page("Join " + inv["company"], invite_html(inv, token, "Too many attempts. Wait a few minutes and try again."))
+    try:
+        uid, bid, kind = ACC.accept_invite(token, name, password)
+    except ValueError as ex_:
+        ACC._note_fail(inv["email"], client_ip(request))
+        return page("Join " + inv["company"], invite_html(inv, token, str(ex_)))
+    pids = json.loads(inv["project_ids"] or "[]")
+    who = q("SELECT name FROM users WHERE id=?", (uid,))[0]["name"]
+    if ACC.KINDS[kind][1] == "submitter":
+        for pid in pids:
+            p = RE.get_project(int(pid))
+            if p and p["brand_id"] == bid:
+                RE.grant(uid, bid, int(pid), "invite by " + (inv["invited_by"] or "company"))
+    log(None, who, "INVITE_ACCEPTED", f"{who} joined as {ACC.KINDS[kind][0]}", bid)
+    start_session(request, uid)
+    request.session["flash"] = f"Welcome to {inv['company']}."
+    return RedirectResponse("/", 303)
+
+
+@app.get("/admin/team", response_class=HTMLResponse)
+def team_page(request: Request):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    bid = u["brand_id"]
+    link = request.session.pop("invite_link", "")
+    notice = ""
+    if link:
+        notice = ui.alert(f'Invite link (shown once, single use, valid {ACC.INVITE_DAYS} days): '
+                          f'<br><input readonly value="{e(link)}" style="width:100%" onclick="this.select()">',
+                          "ok", "Invite created.")
+    mrows = []
+    for m in ACC.members(bid):
+        label = "Builder" if m["kind"] == "builder" else ACC.KINDS.get(m["kind"], (m["kind"],))[0]
+        rm = ""
+        if m["kind"] != "builder":
+            rm = (f'<form method="post" action="/admin/team/remove" style="display:inline"><input type="hidden" name="user_id" value="{m["id"]}">'
+                  f'<button class="btn secondary sm" type="submit">Remove</button></form>')
+        mrows.append([e(m["name"]), e(m["email"] or ""), e(label), e(str(m["joined"] or "")[:10]), rm])
+    irows = []
+    for i in ACC.pending_invites(bid):
+        irows.append([e(i["email"]), e(ACC.KINDS[i["kind"]][0]), e(i["expires_at"][:10]),
+                      f'<form method="post" action="/admin/team/revoke" style="display:inline"><input type="hidden" name="invite_id" value="{i["id"]}">'
+                      f'<button class="btn secondary sm" type="submit">Cancel</button></form>'])
+    projects = RE.brand_projects(bid)
+    boxes = "".join(f'<label style="display:block"><input type="checkbox" name="project_id" value="{p["id"]}"> {e(p["official_name"])}</label>'
+                    for p in projects) or '<p class="muted">Add a project first (Projects and Facts), then invite people to it.</p>'
+    kinds = "".join(f'<option value="{k}">{e(v[0])}</option>' for k, v in ACC.KINDS.items())
+    mail_note = ("The invite is also emailed." if mailer.configured()
+                 else "Email sending is not set up on this server, so copy the link and send it yourself.")
+    form = (f'<form method="post" action="/admin/team/invite" data-lock><label for="ie">Email address</label>'
+            f'<input id="ie" name="email" type="email" required><p></p><label for="ik">Role</label>'
+            f'<select id="ik" name="kind">{kinds}</select><p></p><b>Projects they may use</b><div>{boxes}</div>'
+            f'<p class="hint">Partners, freelancers and agencies only see and submit for the projects ticked here. {mail_note}</p>'
+            f'<button class="btn" type="submit">Create invite</button></form>')
+    body = (ui.page_header("Team and Invites", "Invite people to your company and control which projects they can use.")
+            + '<div class="stack">' + notice
+            + ui.card("People", ui.table(["Name", "Email", "Role", "Joined", ""], mrows, "People"))
+            + ui.card("Pending invites", ui.table(["Email", "Role", "Expires", ""], irows, "Pending invites")
+                      if irows else ui.empty("No pending invites"))
+            + ui.card("Invite someone", form) + "</div>")
+    return page("Team and Invites", body, u, "team", [("Team and Invites", None)], request)
+
+
+@app.post("/admin/team/invite")
+async def team_invite(request: Request):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    f = await request.form()
+    pids = [int(p) for p in f.getlist("project_id") if str(p).isdigit() and own_project(u, int(p))]
+    try:
+        tok = ACC.create_invite(u["brand_id"], f.get("email", ""), f.get("kind", ""), pids, u["name"])
+    except ValueError as ex_:
+        request.session["flash"] = str(ex_)
+        return RedirectResponse("/admin/team", 303)
+    link = f"{public_base(request)}/invite/{tok}"
+    request.session["invite_link"] = link
+    company = q("SELECT name FROM brands WHERE id=?", (u["brand_id"],))[0]["name"]
+    sent = mailer.send(ACC.clean_email(f.get("email", "")), f"{u['name']} invited you to {company} on BrandGuard",
+                       f"{u['name']} has invited you to join {company} on BrandGuard.\n\nOpen this link to create your "
+                       f"account (valid {ACC.INVITE_DAYS} days, single use):\n{link}\n")
+    log(None, u["name"], "INVITE_CREATED", f"{ACC.clean_email(f.get('email', ''))} as {ACC.KINDS[f.get('kind')][0]}"
+        + (" (emailed)" if sent else ""), u["brand_id"])
+    return RedirectResponse("/admin/team", 303)
+
+
+@app.post("/admin/team/revoke")
+def team_revoke(request: Request, invite_id: int = Form(0)):
+    u = admin_only(request)
+    if u and ACC.revoke_invite(u["brand_id"], invite_id):
+        log(None, u["name"], "INVITE_CANCELLED", f"Invite {invite_id}", u["brand_id"])
+        request.session["flash"] = "Invite cancelled."
+    return RedirectResponse("/admin/team", 303)
+
+
+@app.post("/admin/team/remove")
+def team_remove(request: Request, user_id: int = Form(0)):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    if ACC.remove_member(u["brand_id"], user_id):
+        for g in q("SELECT id FROM grants WHERE user_id=? AND brand_id=? AND revoked_at IS NULL", (user_id, u["brand_id"])):
+            RE.revoke(g["id"], u["brand_id"], u["name"])
+        log(None, u["name"], "MEMBER_REMOVED", f"User {user_id} removed. Their access ended immediately.", u["brand_id"])
+        request.session["flash"] = "Removed. Their project access ended immediately."
+    return RedirectResponse("/admin/team", 303)
 
 
 # ============================================================ lessons
