@@ -60,6 +60,7 @@ NAV_ADMIN = [
     ("rules", "/admin/rules", "Brand Rules", "shield"),
     ("facts", "/admin/projects", "Projects and Facts", "tag"),
     ("access", "/admin/access", "Project Access", "users"),
+    ("team", "/admin/team", "Team and Invites", "users"),
     ("disputes", "/disputes", "Disputes", "scale"),
     ("learned", "/admin/learned", "Lessons", "history"),
     ("approvals", "/approvals", "Approval Records", "badge-check"),
@@ -70,6 +71,7 @@ NAV_ADMIN = [
 NAV_SUB = [
     ("overview", "/", "My Dashboard", "home"),
     ("submit", "/submit", "Submit a Video", "upload"),
+    ("bulk", "/bulk", "Bulk Upload", "upload"),
     ("reviews", "/reviews", "My Submissions", "folder"),
     ("disputes", "/disputes", "Disputes", "scale"),
     ("verify", "/verify", "Verify a File", "file-check"),
@@ -269,6 +271,7 @@ a.stat:hover{border-color:var(--blue)}
 .grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
 .cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:20px;align-items:start}
 .cols-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px}
+.cols-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
 .empty{text-align:center;padding:32px 16px;color:var(--text-2)}
 .empty .ic{color:#9aa6b8;margin-bottom:6px}
 .empty-title{font-weight:600;color:var(--text);margin:0 0 4px}
@@ -382,7 +385,7 @@ dialog.dlg h2{margin-bottom:8px;font-size:19px}
 .role-card .ic-lg{width:40px;height:40px;border-radius:8px;background:var(--blue-bg);color:var(--blue-dk);display:grid;place-items:center}
 .role-card .btn{margin-top:auto;align-self:flex-start}
 
-@media (max-width:1100px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.cols{grid-template-columns:minmax(0,1fr)}.cols-3{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:1100px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.cols{grid-template-columns:minmax(0,1fr)}.cols-3,.cols-2{grid-template-columns:minmax(0,1fr)}}
 @media (max-width:900px){
   .shell{grid-template-columns:minmax(0,1fr)}
   .side{position:fixed;left:0;top:0;bottom:0;width:272px;z-index:50;transform:translateX(-100%);transition:transform .2s}
@@ -527,7 +530,7 @@ def shell(title, body, user, role_label, active="", crumbs=None, queue_count=0,
             '<div class="shell">'
             f'<aside class="side" id="side"><a class="brand" href="/"><span class="logo">{_LOGO}</span>BrandGuard</a>'
             f'<nav aria-label="Main">{"".join(links)}</nav>'
-            f'<div class="side-foot"><div class="lbl">Switch demo role</div>{demo}'
+            f'<div class="side-foot">{"<div class=lbl>Switch demo role</div>" + demo if demo else ""}'
             f'<a href="/logout">{icon("log-out", 16)}Log out</a></div></aside>'
             '<div class="scrim" id="scrim"></div>'
             '<div class="main-col"><header class="top">'
