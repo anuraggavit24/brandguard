@@ -41,6 +41,23 @@ UNITS = _n({
     "rupees": 1, "rupee": 1, "rs": 1, "inr": 1, "रुपये": 1, "रुपया": 1, "रुपए": 1,
 })
 
+# Marathi / Hindi inflect the unit word ("लाखा", "लाखांपर्यंत", "कोटींचा", "लाखों", "lakhon"). Accept a unit stem plus a short ending.
+_STEMS = [(norm(k).lower(), v) for k, v in (("लाख", LAKH), ("कोटी", CRORE), ("कोटि", CRORE), ("करोड", CRORE),
+                                            ("करोड़", CRORE), ("lakh", LAKH), ("laakh", LAKH), ("crore", CRORE),
+                                            ("koti", CRORE), ("karod", CRORE))]
+
+
+def unit_mult(tok):
+    """Multiplier for a unit word, allowing inflected endings. None if it is not a unit."""
+    m = UNITS.get(tok)
+    if m is not None:
+        return m
+    for stem, mult in _STEMS:
+        if tok.startswith(stem) and 0 < len(tok) - len(stem) <= 8:
+            return mult
+    return None
+
+
 NUMWORDS = _n({
     "ek": 1, "एक": 1, "one": 1,
     "do": 2, "दो": 2, "don": 2, "दोन": 2, "two": 2,
@@ -134,7 +151,7 @@ def extract_prices(text):
     toks = tokenize(text)
     found = []
     for i, tok in enumerate(toks):
-        mult = UNITS.get(tok)
+        mult = unit_mult(tok)
         if mult is None:
             continue
         window = [t for t in toks[max(0, i - 5):i] if t not in FILLERS][-4:]
@@ -163,7 +180,7 @@ def find_unparsed_units(text):
     toks = tokenize(text)
     bad = []
     for i, tok in enumerate(toks):
-        if tok in UNITS and UNITS[tok] > 1:
+        if (unit_mult(tok) or 0) > 1:
             if parse_quantity(toks[max(0, i - 4):i]) is None:
                 bad.append(" ".join(toks[max(0, i - 3):i + 1]))
     return bad
@@ -344,6 +361,11 @@ def selftest():
         ("ek crore tees lakh", 13_000_000),
         ("एक कोटी तीस लाख", 13_000_000),
         ("1 crore thirty five lakh", 13_500_000),
+        ("प्लाट हे एक कोटी 30 लाखा परेंता", 13_000_000),
+        ("एक कोटी तीस लाखा", 13_000_000),
+        ("1 कोटी 30 लाखांपर्यंत", 13_000_000),
+        ("1 करोड़ 30 लाखों", 13_000_000),
+        ("1 crore 30 lakhon", 13_000_000),
     ]
     for text, expected in cases:
         got = [p["value"] for p in extract_prices(text)]
