@@ -148,31 +148,9 @@ def parse_quantity(toks):
 
 
 def extract_prices(text):
-    toks = tokenize(text)
-    found = []
-    for i, tok in enumerate(toks):
-        mult = unit_mult(tok)
-        if mult is None:
-            continue
-        window = [t for t in toks[max(0, i - 5):i] if t not in FILLERS][-4:]
-        q = parse_quantity(window)
-        if q is None or q <= 0:
-            continue
-        item = {"value": round(q * mult), "spoken": " ".join(toks[max(0, i - 3):i + 1]), "_i": i, "_m": mult}
-        prev = found[-1] if found else None
-        # "1 crore 30 lakh" is one amount (1.30 crore), not two
-        if (prev and prev["_m"] == CRORE and mult == LAKH and i - prev["_i"] <= 5
-                and item["value"] < CRORE):
-            prev["value"] += item["value"]
-            prev["spoken"] = prev["spoken"] + " " + " ".join(toks[prev["_i"] + 1:i + 1])
-            prev["_m"] = LAKH
-            prev["_i"] = i
-            continue
-        found.append(item)
-    for f in found:
-        f.pop("_i", None)
-        f.pop("_m", None)
-    return found
+    """Money amounts in rupees found in the text. Implemented in numbers.py (any product, rupees to crores)."""
+    import amounts as _amounts
+    return _amounts.extract_amounts(text)
 
 
 def find_unparsed_units(text):
