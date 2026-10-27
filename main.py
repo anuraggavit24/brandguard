@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 import accounts as ACC
+import jobs as JOBS
 import learning as LRN
 import mailer
 import ocr as OCR
@@ -145,6 +146,7 @@ RE.setup(DB_PATH)
 RE.seed_if_empty()
 LRN.setup(DB_PATH)
 ACC.setup(DB_PATH)
+JOBS.setup(DB_PATH)
 
 
 def log(sid, actor, action, note="", brand_id=None):
@@ -890,21 +892,22 @@ def store_projects(sid, rep, actor):
             actor if rep.get("identity", {}).get("state") == "CONFIRMED" else None))
 
 
-def run_review(u, brand_id, path, sha, filename, language, source_url=None, caption="", hint_pid=None):
+def review_submission(u, brand_id, path, sha, filename, language, source_url=None, caption="", hint_pid=None):
+    """Review one file and store the result. Returns (submission_id, None) or (None, message)."""
     brand = q("SELECT * FROM brands WHERE id=?", (brand_id,))[0]
     reg = json.loads(brand["registry"])
     if not RE.authorized_projects(u["id"], brand_id):
-        return err_page(u, f"You have not been given access to any {brand['name']} project yet. "
-                           "Ask the company to grant you access, then submit again.")
+        return None, (f"You have not been given access to any {brand['name']} project yet. "
+                      "Ask the company to grant you access, then submit again.")
     if hint_pid and not RE.can_use_project(u["id"], hint_pid):
-        return err_page(u, "You do not have access to that project.")
+        return None, "You do not have access to that project."
     try:
         segs = transcribe_file(path, language, glossary_for(reg, brand_id, u["id"]))
         screen = None if source_url else OCR.read_screen(path, MAX_SECONDS)
         rep = analyze(u, brand_id, segs, caption, reg, hint_pid, is_link=bool(source_url), screen=screen)
     except Exception as ex_:
         msg = str(ex_) if isinstance(ex_, (ValueError, RuntimeError)) else "Something went wrong while reviewing this file."
-        return err_page(u, msg)
+        return None, msg
 
     dup = q("SELECT id FROM submissions WHERE sha256=? AND brand_id=? ORDER BY id LIMIT 1", (sha, brand_id))
     if dup:
@@ -926,7 +929,14 @@ def run_review(u, brand_id, path, sha, filename, language, source_url=None, capt
         log(sid, "BrandGuard engine", "DUPLICATE_FOUND", f"Identical file already submitted as #{dup[0]['id']}", brand_id)
     if approval:
         log(sid, "BrandGuard engine", "AUTO_APPROVED", f"{approval} (policy {RE.POLICY_VERSION})", brand_id)
-    return RedirectResponse(f"/s/{sid}", 303)
+    return sid, None
+
+
+def run_review(u, brand_id, path, sha, filename, language, source_url=None, caption="", hint_pid=None):
+    sid, msg = review_submission(u, brand_id, path, sha, filename, language, source_url, caption, hint_pid)
+    return err_page(u, msg) if msg else RedirectResponse(f"/s/{sid}", 303)
+
+
 
 
 @app.post("/confirm/{sid}")
@@ -1063,6 +1073,7 @@ ACTION_LABEL = {
     "LESSON_LEARNED": "Lesson written from dispute", "LESSON_APPLIED": "Earlier decision applied",
     "LESSON_CHANGED": "Lesson changed", "COMPANY_CREATED": "Company created", "INVITE_CREATED": "Invite created",
     "INVITE_ACCEPTED": "Invite accepted", "INVITE_CANCELLED": "Invite cancelled", "MEMBER_REMOVED": "Member removed",
+    "BATCH_STARTED": "Bulk batch queued", "BATCH_DONE": "Bulk batch finished",
 }
 DECISION_TEXT = {
     "AUTO_APPROVED": ("ok", "check-circle", "Every price matched the approved facts and nothing needed a person to check."),
@@ -2628,6 +2639,157 @@ def team_remove(request: Request, user_id: int = Form(0)):
         log(None, u["name"], "MEMBER_REMOVED", f"User {user_id} removed. Their access ended immediately.", u["brand_id"])
         request.session["flash"] = "Removed. Their project access ended immediately."
     return RedirectResponse("/admin/team", 303)
+
+
+# ============================================================ bulk upload queue
+BULK_MAX_FILES = int(os.environ.get("BULK_MAX_FILES", "10"))
+BULK_MAX_PENDING = int(os.environ.get("BULK_MAX_PENDING", "30"))
+
+
+def process_job(job):
+    """Worker callback: review one stored file. Returns (submission_id, error message)."""
+    rows = q("SELECT * FROM users WHERE id=?", (job["user_id"],))
+    if not rows:
+        return None, "The account that uploaded this file no longer exists."
+    p = Path(job["path"])
+    if not p.exists():
+        return None, "The stored file is missing. It may have been cleared when the server restarted. Upload it again."
+    sid, msg = review_submission(rows[0], job["brand_id"], p, job["sha"], job["filename"], job["language"],
+                                 hint_pid=job["hint_pid"])
+    return sid, msg
+
+
+def notify_batch(batch):
+    u = q("SELECT * FROM users WHERE id=?", (batch["user_id"],))
+    if not u:
+        return
+    u = u[0]
+    sm = JOBS.summary(batch["id"])
+    log(None, "BrandGuard engine", "BATCH_DONE",
+        f"Batch {batch['id']}: {sm['approved']} approved, {sm['rejected']} rejected, {sm['check']} need a person, {sm['failed']} failed.",
+        batch["brand_id"])
+    if u["pw_hash"] and u["email"]:
+        base = os.environ.get("PUBLIC_URL", "").rstrip("/")
+        mailer.send(u["email"], f"Your BrandGuard batch #{batch['id']} is ready",
+                    f"{sm['total']} videos were reviewed.\n\nApproved: {sm['approved']}\nRejected: {sm['rejected']}\n"
+                    f"Need a person to check: {sm['check']}\nCould not be reviewed: {sm['failed']}\n\n"
+                    f"Open the results: {base}/bulk/{batch['id']}\n")
+
+
+def run_queue_once():
+    """One worker step. Used by the background thread and by tests."""
+    return JOBS.run_once(process_job, notify_batch)
+
+
+@app.on_event("startup")
+def start_worker():
+    JOBS.reset_stuck()
+    if os.environ.get("BG_WORKER", "1") != "0":
+        JOBS.start(process_job, notify_batch)
+
+
+JOB_BADGE = {"QUEUED": ("Waiting", "neutral", "clock"), "PROCESSING": ("Reviewing now", "warn", "clock"),
+             "DONE": ("Reviewed", "ok", "check-circle"), "FAILED": ("Could not review", "bad", "x-circle")}
+
+
+@app.get("/bulk", response_class=HTMLResponse)
+def bulk_form(request: Request):
+    u = me(request)
+    if not u or u["role"] != "submitter":
+        return RedirectResponse("/", 303)
+    brands = user_brands(u)
+    cid = current_company(request, u)
+    projs = RE.authorized_projects(u["id"], cid) if cid else []
+    popts = '<option value="">Detect from the video</option>' + "".join(
+        f'<option value="{p["id"]}">{e(p["official_name"])}</option>' for p in projs)
+    bopts = "".join(f'<option value="{b["id"]}"{" selected" if b["id"] == cid else ""}>{e(b["name"])}</option>' for b in brands)
+    exts = ",".join(sorted(ALLOWED))
+    form = (f'<form method="post" action="/bulk" enctype="multipart/form-data" data-lock>'
+            f'<label for="bc">Company</label><select id="bc" name="brand_id">{bopts}</select><p></p>'
+            f'<label for="bl">Spoken language</label><select id="bl" name="language"><option value="auto">Auto-detect</option>'
+            f'<option value="mr">Marathi</option><option value="hi">Hindi</option><option value="en">English</option></select><p></p>'
+            f'<label for="bp">Project (optional)</label><select id="bp" name="project_id">{popts}</select><p></p>'
+            f'<label for="bf">Videos (up to {BULK_MAX_FILES} at a time)</label>'
+            f'<input id="bf" type="file" name="files" multiple required accept="{exts}">'
+            f'<p class="hint">Up to {MAX_MB} MB each. They are saved first and reviewed one at a time in the background, '
+            f'so you can close this page. You get an email when the batch is done if email is set up for this server, '
+            f'and the results stay on this page either way.</p>'
+            f'<button class="btn" type="submit">{ui.icon("upload", 16)}Upload and review</button></form>')
+    recent = []
+    for b in JOBS.recent_batches(u["id"]):
+        sm = JOBS.summary(b["id"])
+        recent.append([f'<a href="/bulk/{b["id"]}">Batch #{b["id"]}</a>', e(b["created_at"]), str(sm["total"]),
+                       "Done" if sm["waiting"] == 0 else f'{sm["waiting"]} waiting'])
+    body = (ui.page_header("Bulk Upload", "Upload many videos at once. They are queued and reviewed one by one.")
+            + '<div class="stack">' + ui.card("New batch", form)
+            + ui.card("Your recent batches", ui.table(["Batch", "Started", "Videos", "Status"], recent, "Batches")
+                      if recent else ui.empty("No batches yet")) + "</div>")
+    return page("Bulk Upload", body, u, "bulk", [("Bulk Upload", None)], request)
+
+
+@app.post("/bulk")
+def bulk_submit(request: Request, brand_id: int = Form(...), language: str = Form("auto"), project_id: str = Form(""),
+                files: list[UploadFile] = File(...)):
+    u = me(request)
+    if not u or u["role"] != "submitter":
+        return RedirectResponse("/", 303)
+    if not allowed_brand(u, brand_id):
+        return err_page(u, "You are not linked to that company.")
+    files = [f for f in files if f and f.filename]
+    if not files:
+        return err_page(u, "Choose at least one file.")
+    if len(files) > BULK_MAX_FILES:
+        return err_page(u, f"Upload at most {BULK_MAX_FILES} files at a time.")
+    if JOBS.pending_count(u["id"]) + len(files) > BULK_MAX_PENDING:
+        return err_page(u, "You already have many videos waiting. Wait for them to finish, then upload more.")
+    hint = int(project_id) if project_id.isdigit() else None
+    if hint and not RE.can_use_project(u["id"], hint):
+        return err_page(u, "You do not have access to that project.")
+    items, skipped = [], []
+    for f in files:
+        try:
+            path, sha = save_upload(f)
+            items.append({"filename": f.filename, "path": path, "sha": sha})
+        except Exception as ex_:
+            skipped.append(f"{f.filename}: {ex_ if isinstance(ex_, (ValueError, RuntimeError)) else 'upload failed'}")
+    if not items:
+        return err_page(u, "None of the files could be accepted. " + " ".join(skipped))
+    bid = JOBS.create_batch(brand_id, u["id"], items, language if language in ("auto", "mr", "hi", "en") else "auto", hint)
+    log(None, u["name"], "BATCH_STARTED", f"Batch {bid}: {len(items)} file(s) queued", brand_id)
+    request.session["flash"] = (f"{len(items)} video(s) queued." + (f" Skipped: {' '.join(skipped)}" if skipped else ""))[:400]
+    return RedirectResponse(f"/bulk/{bid}", 303)
+
+
+@app.get("/bulk/{batch_id}", response_class=HTMLResponse)
+def bulk_view(request: Request, batch_id: int):
+    u = me(request)
+    b = JOBS.get_batch(batch_id)
+    if not u or not b or not (b["user_id"] == u["id"] or (u["role"] == "admin" and u["brand_id"] == b["brand_id"])):
+        return RedirectResponse("/", 303)
+    sm = JOBS.summary(batch_id)
+    rows = []
+    for j in JOBS.batch_jobs(batch_id):
+        txt, tone, ic = JOB_BADGE[j["status"]]
+        extra = ""
+        if j["status"] == "QUEUED":
+            extra = f'<span class="muted"> {JOBS.ahead_of(j)} ahead</span>'
+        if j["status"] == "DONE" and j["sub_id"]:
+            result = f'{ui.chip(j["sub_status"])} <a href="/s/{j["sub_id"]}">Open report</a>'
+        elif j["status"] == "FAILED":
+            result = e(j["error"] or "")
+        else:
+            result = ""
+        rows.append([e(j["filename"] or ""), ui.badge(txt, tone, ic) + extra, result])
+    done = sm["waiting"] == 0
+    refresh = "" if done else '<meta http-equiv="refresh" content="6">'
+    stats = (f'<p><b>{sm["total"]}</b> videos. <b>{sm["approved"]}</b> approved, <b>{sm["rejected"]}</b> rejected, '
+             f'<b>{sm["check"]}</b> need a person, <b>{sm["failed"]}</b> failed'
+             + ("." if done else f', <b>{sm["waiting"]}</b> still waiting. This page refreshes by itself.') + '</p>')
+    body = (refresh + ui.page_header(f"Batch #{batch_id}", "Videos are reviewed one at a time in the background.")
+            + '<div class="stack">' + ui.card("Summary", stats)
+            + ui.card("Videos", ui.table(["File", "Progress", "Result"], rows, "Batch videos"))
+            + f'<p><a class="btn secondary" href="/bulk">Back to bulk upload</a></p></div>')
+    return page(f"Batch #{batch_id}", body, u, "bulk", [("Bulk Upload", "/bulk"), (f"Batch #{batch_id}", None)], request)
 
 
 # ============================================================ lessons

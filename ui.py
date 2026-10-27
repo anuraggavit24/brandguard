@@ -71,6 +71,7 @@ NAV_ADMIN = [
 NAV_SUB = [
     ("overview", "/", "My Dashboard", "home"),
     ("submit", "/submit", "Submit a Video", "upload"),
+    ("bulk", "/bulk", "Bulk Upload", "upload"),
     ("reviews", "/reviews", "My Submissions", "folder"),
     ("disputes", "/disputes", "Disputes", "scale"),
     ("verify", "/verify", "Verify a File", "file-check"),
