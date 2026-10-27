@@ -61,7 +61,7 @@ NAV_ADMIN = [
     ("facts", "/admin/projects", "Projects and Facts", "tag"),
     ("access", "/admin/access", "Project Access", "users"),
     ("disputes", "/disputes", "Disputes", "scale"),
-    ("learned", "/admin/learned", "Learned Cases", "history"),
+    ("learned", "/admin/learned", "Lessons", "history"),
     ("approvals", "/approvals", "Approval Records", "badge-check"),
     ("audit", "/audit", "Audit Trail", "history"),
     ("verify", "/verify", "Verify a File", "file-check"),

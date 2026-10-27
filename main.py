@@ -614,6 +614,41 @@ def transcribe(wav: Path, lang: str, glossary):
     return transcribe_groq(wav, lang, glossary)
 
 
+def record_lessons(sid, rep, brand_id):
+    ids = [c["lesson_id"] for c in rep.get("cleared", [])]
+    LRN.record_uses(sid, ids)
+    for c in rep.get("cleared", []):
+        log(sid, "BrandGuard engine", "LESSON_APPLIED",
+            f'"{c["evidence"]}" not flagged: lesson #{c["lesson_id"]} from submission #{c["source_sub"]}.', brand_id)
+
+
+def apply_lessons(rep, brand_id):
+    """Clear wording flags that a builder already decided are harmless in this exact context (precedent)."""
+    inp = rep.get("inputs", {})
+    rep["cleared"], keep = [], []
+    for f in rep["findings"]:
+        les = None
+        if f["type"] in LRN.LEARNABLE:
+            src = f.get("source", "audio")
+            if src == "caption":
+                cands = [inp.get("caption", "")]
+            elif src == "screen":
+                cands = [l["text"] for l in inp.get("screen", []) if abs(l["start"] - f["time"]) < 0.01] or [l["text"] for l in inp.get("screen", [])]
+            else:
+                cands = [x["text"] for x in inp.get("segments", []) if abs(x["start"] - f["time"]) < 0.01] or [x["text"] for x in inp.get("segments", [])]
+            trig = LRN.tokens(f.get("evidence", ""))
+            for text in cands:
+                if LRN._occurrences(LRN.tokens(text), trig):
+                    les = LRN.match(brand_id, f["type"], f.get("evidence", ""), text)
+                    break
+        if les:
+            rep["cleared"].append({"lesson_id": les["id"], "type": f["type"], "evidence": f["evidence"], "time": f["time"],
+                                   "summary": les["summary"], "source_sub": les["source_sub"]})
+        else:
+            keep.append(f)
+    rep["findings"] = keep
+
+
 def finalize(rep):
     """Recount findings and set the verdict from the final list."""
     fl = [f for f in rep["findings"] if f["status"] == "FLAG"]
@@ -747,15 +782,6 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
         claims, used = RE.validate(by_proj, all_p, THRESHOLD)
         rep["claims"], rep["facts_used"] = claims, used
         for c in claims:
-            if c["verdict"] == RE.VIOLATION and c["kind"] in ("price", "booking"):
-                prec = LRN.precedent(brand_id, c)
-                if prec:
-                    said = f" The creator had said {fmt_money(prec['said_value'])}." if prec["said_value"] else ""
-                    c["verdict"] = RE.REVIEW
-                    c["reason"] += (f" A similar reading was overturned by a builder before "
-                                    f"(submission #{prec['sub_id']}).{said}")
-                    c["fix"] = "A manager should listen to this moment and confirm."
-                    c["precedent"] = prec["sub_id"]
             if c["verdict"] != RE.VERIFIED:
                 rep["findings"].append(RE.claim_to_finding(c))
         for src_, t_, conf_, text_ in unassigned:
@@ -806,6 +832,7 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
                    "Not available. A RERA number is only compared with the BrandGuard registry unless an administrator has recorded an official check."))
     rep["checks"] = checks
 
+    apply_lessons(rep, brand_id)
     if not segs:
         rep["findings"].append(make_finding(
             "SUPERVISION", "MEDIUM", "NO_SPEECH_DETECTED", 0, "-",
@@ -879,6 +906,7 @@ def run_review(u, brand_id, path, sha, filename, language, source_url=None, capt
               json.dumps(rep, ensure_ascii=False), datetime.now().strftime("%Y-%m-%d %H:%M"),
               approval, source_url))
     store_projects(sid, rep, u["name"])
+    record_lessons(sid, rep, brand_id)
     how = "SUBMITTED_LINK" if source_url else "SUBMITTED"
     log(sid, u["name"], how, f"{filename} for {brand['name']}", brand_id)
     log(sid, "BrandGuard engine", "AUTO_REVIEW",
@@ -927,6 +955,7 @@ async def confirm_project(request: Request, sid: int):
     ex("UPDATE submissions SET status=?, verdict=?, report=?, approval_id=? WHERE id=?",
        (status, rep["verdict"], json.dumps(rep, ensure_ascii=False), approval, sid))
     store_projects(sid, rep, u["name"])
+    record_lessons(sid, rep, s["brand_id"])
     names = ", ".join(RE.get_project(i)["official_name"] for i in ids)
     log(sid, u["name"], "PROJECT_CONFIRMED", f"Confirmed project: {names}", s["brand_id"])
     log(sid, "BrandGuard engine", "AUTO_REVIEW", f"{rep['verdict']} ({rep['flags']} flags, {rep['supervision']} to check)", s["brand_id"])
@@ -1020,7 +1049,8 @@ ACTION_LABEL = {
     "ACCESS_REVOKED": "Project access revoked", "UNIT_ADDED": "Property type added", "RERA_RECORDED": "RERA check recorded",
     "PRICE_SAVED": "Approved price saved", "PRICE_REMOVED": "Approved price removed",
     "RULES_IMPORTED": "Brand rules imported from document",
-    "CASE_REMEMBERED": "Dispute remembered for next time",
+    "LESSON_LEARNED": "Lesson written from dispute", "LESSON_APPLIED": "Earlier decision applied",
+    "LESSON_CHANGED": "Lesson changed",
 }
 DECISION_TEXT = {
     "AUTO_APPROVED": ("ok", "check-circle", "Every price matched the approved facts and nothing needed a person to check."),
@@ -1191,9 +1221,10 @@ def view_submission(request: Request, sid: int):
             ctx = f'<p><b>Creator\'s explanation:</b> {e(s["dispute_note"] or "")}</p>'
             if said_val:
                 ctx += f'<p><b>What the creator says they said:</b> {e(said_val)}</p>'
-            ctx += ('<p class="muted">If you overturn this on a price or booking claim, BrandGuard remembers the case. '
-                    'The next time the same reading appears, it asks a person to check instead of rejecting. '
-                    'It never approves on its own, and you can switch a remembered case off under Learned Cases.</p>')
+            ctx += ('<p class="muted">If you overturn a wording flag (a banned or unsupported phrase), an AI writes a lesson '
+                    'from both notes. Next time the same phrase appears in the same context it passes by precedent. '
+                    'Anything new is still flagged or sent to a person. Prices and facts are never learned. '
+                    'Manage lessons under Lessons.</p>')
         yes, no = ("Overturn decision", "Uphold rejection") if disputed else ("Approve", "Reject")
         actions = ui.card("Your decision", ctx + '<p class="muted">Review the findings, then record a decision. '
                           'It is saved to the audit trail.</p>'
@@ -1246,6 +1277,15 @@ def view_submission(request: Request, sid: int):
         transcript += ui.card("Text read from the screen",
                               f'<p class="muted">{meta["frames"]} frames read (2 per second plus every scene change). '
                               f'Each line is shown once, at the first time it appeared.</p>{srows}')
+
+    cleared = rep.get("cleared") or []
+    if cleared:
+        crows = "".join(
+            f'<div class="tr-row"><time>{fmt_time(c["time"])}</time><span><b>"{e(c["evidence"])}"</b> not flagged. {e(c["summary"])} '
+            f'<a href="/s/{c["source_sub"]}">Decision in #{c["source_sub"]}</a></span></div>' for c in cleared)
+        transcript += ui.card("Cleared by earlier builder decisions",
+                              '<p class="muted">A builder already decided this wording is harmless in this context. '
+                              'Anything new would still be flagged.</p>' + crows)
 
     # ---- right column: grouped findings
     parts, clean = [], []
@@ -1358,10 +1398,16 @@ def decide(request: Request, sid: int, decision: str = Form(...), note: str = Fo
         log(sid, u["name"], action, (approval or "") + (" " + note.strip()[:300] if note.strip() else ""))
         if was_dispute and decision == "approve":
             try:
-                n = LRN.record_overturn(get_sub(sid), rep_of(s), note.strip()[:300])
-                if n:
-                    log(sid, "BrandGuard engine", "CASE_REMEMBERED",
-                        f"{n} reading(s) from this dispute will be sent to a person next time, not rejected.")
+                made = LRN.create_from_dispute(get_sub(sid), rep_of(s), s["dispute_note"] or "", note.strip()[:300], u["name"])
+                for m in made:
+                    if m["reused"]:
+                        continue
+                    log(sid, "BrandGuard engine", "LESSON_LEARNED",
+                        f'Lesson #{m["id"]} ({"active" if m["active"] else "waiting for approval"}): {m["summary"]}', u["brand_id"])
+                if made and any(not m["reused"] for m in made):
+                    request.session["flash"] = ("Decision recorded. BrandGuard wrote a lesson from this dispute. "
+                                                "Prices and facts are never learned. Review it under Lessons.")
+                    return RedirectResponse(f"/s/{sid}", 303)
             except Exception:
                 pass  # learning must never block a decision
         request.session["flash"] = "Decision recorded: " + ui.STATUS[status][0] + "."
@@ -2349,47 +2395,59 @@ def access_revoke(request: Request, grant_id: int = Form(0)):
     return RedirectResponse("/admin/access", 303)
 
 
-# ============================================================ learned cases (new)
+# ============================================================ lessons
 @app.get("/admin/learned", response_class=HTMLResponse)
 def learned_page(request: Request):
     u = admin_only(request)
     if not u:
         return RedirectResponse("/", 303)
-    cases = LRN.list_cases(u["brand_id"])
+    st = LRN.stats(u["brand_id"])
     rows = []
-    for c in cases:
-        state = ui.badge("Active", "ok", "check-circle") if c["active"] else ui.badge("Switched off", "neutral", "clock")
-        said = e(c["said_text"] or "-")
-        btn = ""
-        if c["active"]:
-            btn = (f'<form method="post" action="/admin/learned/off" style="display:inline">'
-                   f'<input type="hidden" name="case_id" value="{c["id"]}">'
-                   f'<button class="btn secondary sm" type="submit" aria-label="Switch off this remembered case">Switch off</button></form>')
-        rows.append([e(KIND_LABEL.get(c["kind"], c["kind"])), e(str(c["heard"] or "")), e(str(c["official"] or "")), said,
-                     f'<a href="/s/{c["sub_id"]}">#{c["sub_id"]}</a>', str(c["times"]), e(c["last_seen"] or c["created_at"] or ""),
-                     state, btn])
-    table = (ui.table(["Claim", "System heard", "Approved value", "Creator said", "Overturned in", "Seen", "Last seen", "State", ""],
-                      rows, "Remembered dispute cases")
-             if rows else ui.empty("Nothing remembered yet",
-                                   "When you overturn a dispute about a price or booking amount, the case appears here."))
-    body = (ui.page_header("Learned Cases",
-                           "Disputes you overturned. If the same reading shows up again for this company, BrandGuard asks a person "
-                           "to check instead of rejecting it.")
+    for c in LRN.list_lessons(u["brand_id"]):
+        state = ui.badge("Active", "ok", "check-circle") if c["active"] else ui.badge("Off", "neutral", "clock")
+        cue = "any context" if c["scope"] == "phrase" else (c["cue"] or "-")
+        note = f'<div class="muted">{e(c["pending_reason"])}</div>' if c["pending_reason"] else ""
+        tog = (f'<form method="post" action="/admin/learned/toggle" style="display:inline">'
+               f'<input type="hidden" name="lesson_id" value="{c["id"]}">'
+               f'<input type="hidden" name="on" value="{0 if c["active"] else 1}">'
+               f'<button class="btn secondary sm" type="submit">{"Switch off" if c["active"] else "Switch on"}</button></form>')
+        scope = (f'<form method="post" action="/admin/learned/scope" style="display:inline">'
+                 f'<input type="hidden" name="lesson_id" value="{c["id"]}">'
+                 f'<input type="hidden" name="scope" value="{"context" if c["scope"] == "phrase" else "phrase"}">'
+                 f'<button class="btn secondary sm" type="submit">{"Only in this context" if c["scope"] == "phrase" else "Allow anywhere"}</button></form>')
+        rows.append([f'<b>{e(c["summary"] or "")}</b>{note}', e(c["trigger"]), e(cue), e(c["example"] or ""),
+                     f'<a href="/s/{c["source_sub"]}">#{c["source_sub"]}</a>', str(c["uses"]), state, tog + " " + scope])
+    table = (ui.table(["Lesson", "Phrase", "Harmless when", "Example", "From", "Used", "State", ""], rows, "Lessons")
+             if rows else ui.empty("No lessons yet", "When you overturn a dispute about wording, a lesson appears here."))
+    body = (ui.page_header("Lessons", "What BrandGuard learned from disputes you resolved.")
             + '<div class="stack">'
-            + ui.alert("A remembered case never approves anything on its own. It only changes a rejection into a human check. "
-                       "Switch a case off if you no longer want that.", "info", "How this works.")
-            + ui.card("Remembered cases", table) + "</div>")
-    return page("Learned Cases", body, u, "learned", [("Learned Cases", None)], request)
+            + ui.alert(f"Lessons only cover wording and understanding mistakes. {LRN.NEVER_LEARNED.capitalize()} are never learned. "
+                       "A lesson clears a flag only when the same phrase appears with the same harmless cue words. "
+                       "Anything new still goes to a person or is flagged.", "info", "How this works.")
+            + ui.card("Impact", f'<p><b>{st["lessons"]}</b> lessons, <b>{st["active"]}</b> active. '
+                      f'<b>{st["cleared"]}</b> flags cleared across <b>{st["videos"]}</b> videos.</p>')
+            + ui.card("Lessons", table) + "</div>")
+    return page("Lessons", body, u, "learned", [("Lessons", None)], request)
 
 
-@app.post("/admin/learned/off")
-def learned_off(request: Request, case_id: int = Form(0)):
+@app.post("/admin/learned/toggle")
+def learned_toggle(request: Request, lesson_id: int = Form(0), on: int = Form(0)):
     u = admin_only(request)
     if not u:
         return RedirectResponse("/", 303)
-    if LRN.switch_off(u["brand_id"], case_id):
-        log(None, u["name"], "CASE_REMEMBERED", f"Remembered case {case_id} switched off", u["brand_id"])
-        request.session["flash"] = "Case switched off. That reading will be rejected normally again."
+    if LRN.set_active(u["brand_id"], lesson_id, bool(on)):
+        log(None, u["name"], "LESSON_CHANGED", f"Lesson {lesson_id} switched {'on' if on else 'off'}", u["brand_id"])
+        request.session["flash"] = "Lesson switched on." if on else "Lesson switched off. That wording is checked normally again."
+    return RedirectResponse("/admin/learned", 303)
+
+
+@app.post("/admin/learned/scope")
+def learned_scope(request: Request, lesson_id: int = Form(0), scope: str = Form("context")):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    if LRN.set_scope(u["brand_id"], lesson_id, scope):
+        log(None, u["name"], "LESSON_CHANGED", f"Lesson {lesson_id} scope set to {scope}", u["brand_id"])
     return RedirectResponse("/admin/learned", 303)
 
     
