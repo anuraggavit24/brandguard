@@ -207,6 +207,13 @@ def classify_price(value, prices, conf, threshold):
 
 
 # --------------------------------------------------------------------- review
+def _has_phrase(low, phrase):
+    """Whole-word match for Latin text, plain substring for Devanagari (matras defeat word boundaries)."""
+    if phrase.isascii():
+        return re.search(r"(?<![\w])" + re.escape(phrase) + r"(?![\w])", low) is not None
+    return phrase in low
+
+
 def review(segments, reg, threshold=0.65, check_prices=True):
     prices = [(c["name"], c["price"]) for c in reg.get("configs", [])]
     banned = [norm(x).lower() for x in reg.get("banned_phrases", [])]
@@ -253,6 +260,20 @@ def review(segments, reg, threshold=0.65, check_prices=True):
                 add("FLAG", "HIGH", "BANNED_PHRASE", t, w,
                     f'"{w}" is on the banned-claims list.',
                     "Remove or rephrase this claim.", conf)
+
+        # 3b) preferred wording and tone: advice only, never changes the verdict
+        for rule in reg.get("terminology", []):
+            avoid, _, prefer = norm(rule).partition("=>")
+            avoid, prefer = avoid.strip().lower(), prefer.strip()
+            if avoid and _has_phrase(low, avoid):
+                add("NOTE", "LOW", "TERMINOLOGY", t, avoid,
+                    f'"{avoid}" is not the preferred wording for this brand.',
+                    f'Say "{prefer}" instead.' if prefer else "Use the brand's preferred wording.", conf)
+        for w in reg.get("avoid_tone", []):
+            w = norm(w).strip().lower()
+            if w and _has_phrase(low, w):
+                add("NOTE", "LOW", "TONE", t, w,
+                    f'"{w}" does not fit the brand\'s tone of voice.', "Use calmer, more factual wording.", conf)
 
         # 4) prices
         for p in (extract_prices(text) if check_prices and prices else []):

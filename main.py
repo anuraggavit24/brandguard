@@ -25,6 +25,7 @@ import accounts as ACC
 import jobs as JOBS
 import learning as LRN
 import mailer
+import rewrite as RW
 import ocr as OCR
 import realestate as RE
 import ui
@@ -42,6 +43,8 @@ MODE = os.environ.get("TRANSCRIBE_MODE", "groq")  # groq | local
 LINKS_ENABLED = os.environ.get("LINKS_ENABLED", "1") == "1"
 MAX_MB = 60
 MAX_SECONDS = 180
+VOICE_MIN_AVG = float(os.environ.get("VOICE_MIN_AVG", "0.6"))
+VOICE_MAX_LOW = float(os.environ.get("VOICE_MAX_LOW", "0.4"))
 THRESHOLD = 0.65
 ALLOWED = {".mp4", ".mov", ".mkv", ".webm", ".m4a", ".mp3", ".wav", ".aac", ".ogg"}
 LINK_HOSTS = ("youtube.com", "youtu.be", "instagram.com", "facebook.com", "fb.watch")
@@ -712,7 +715,7 @@ def transcribe_file(src: Path, lang: str, glossary):
 
         
 
-def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_link=False, screen=None):
+def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_link=False, screen=None, use_lessons=True):
     """Rules plus project-aware claim checks. Never approves anything it could not fully check."""
     rep = review(segs, reg, THRESHOLD, check_prices=False)
     caption_parts = RE._split_caption(caption) if caption.strip() else []
@@ -845,7 +848,8 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
                    "Not available. A RERA number is only compared with the BrandGuard registry unless an administrator has recorded an official check."))
     rep["checks"] = checks
 
-    apply_lessons(rep, brand_id)
+    if use_lessons:
+        apply_lessons(rep, brand_id)
     if not segs:
         rep["findings"].append(make_finding(
             "SUPERVISION", "MEDIUM", "NO_SPEECH_DETECTED", 0, "-",
@@ -857,6 +861,32 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
             "SUPERVISION", "LOW", "NO_VERIFIABLE_CLAIM", 0, "-",
             "Nothing in this content could be matched against approved facts, so nothing was verified.",
             "A person should confirm that no price or fact needs checking."))
+    # reliability across voices: very unclear speech is never auto-approved
+    if segs:
+        confs = [float(x.get("conf", 1.0)) for x in segs]
+        avg = sum(confs) / len(confs)
+        low = sum(1 for c_ in confs if c_ < 0.5)
+        rep["voice"] = {"avg": round(avg, 2), "low_lines": low, "lines": len(confs)}
+        clear = avg >= VOICE_MIN_AVG and low / len(confs) <= VOICE_MAX_LOW
+        rep["checks"].append(("Speech clarity", "done" if clear else "incomplete",
+                              f"Average recognition {round(avg * 100)}%, {low} of {len(confs)} lines unclear."))
+        if not clear:
+            rep["findings"].append(make_finding(
+                "SUPERVISION", "MEDIUM", "SPEECH_UNCLEAR", 0, f"{round(avg * 100)}% average recognition",
+                "The speech was hard to recognise (noise, accent or low volume), so the transcript may contain mistakes.",
+                "A person should listen to the video before it is approved.", avg))
+    # repeated advice is shown once
+    seen_notes, kept = set(), []
+    for f in rep["findings"]:
+        if f["status"] == "NOTE":
+            k = (f["type"], f["evidence"], f.get("source"))
+            if k in seen_notes:
+                continue
+            seen_notes.add(k)
+        kept.append(f)
+    rep["findings"] = kept
+    for i_, f in enumerate(rep["findings"]):
+        f["i"] = i_
     finalize(rep)
     if rep["needs_confirmation"] and not any(f["severity"] == "CRITICAL" for f in rep["findings"]):
         rep["verdict"] = "CONFIRM - project needs confirming"
@@ -1044,6 +1074,7 @@ TYPE_LABEL = {
     "UNAUTHORIZED_PROJECT": "Project this account cannot promote",
     "PROJECT_UNCERTAIN": "Could not link a claim to one project",
     "IDENTITY_WEAK": "Project not named in the content",
+    "TERMINOLOGY": "Preferred wording", "TONE": "Tone of voice", "SPEECH_UNCLEAR": "Speech was hard to recognise",
 }
 for _k in ("AREA", "BATHROOMS", "POSSESSION", "RERA", "OFFER", "DISTANCE", "BOOKING", "PRICE"):
     TYPE_LABEL[_k + "_UNVERIFIABLE"] = "No approved fact to compare with (not a confirmed error)"
@@ -1057,7 +1088,10 @@ SECTIONS = [
     ("Confidential information", lambda t: t == "CONFIDENTIAL_DATA"),
     ("Contact information", lambda t: t == "UNKNOWN_CONTACT"),
     ("Claims requiring evidence", lambda t: t == "UNSUPPORTED_CLAIM"),
+    ("Wording and tone suggestions", lambda t: t in ("TERMINOLOGY", "TONE")),
+    ("Speech clarity", lambda t: t == "SPEECH_UNCLEAR"),
 ]
+SUGGESTABLE = ("BANNED_PHRASE", "UNSUPPORTED_CLAIM", "TERMINOLOGY", "TONE")
 ACTION_LABEL = {
     "SUBMITTED": "Submission received", "SUBMITTED_LINK": "Link submission received",
     "AUTO_REVIEW": "Analysis completed", "AUTO_APPROVED": "Auto-approved", "APPROVED": "Approved by reviewer",
@@ -1073,7 +1107,7 @@ ACTION_LABEL = {
     "LESSON_LEARNED": "Lesson written from dispute", "LESSON_APPLIED": "Earlier decision applied",
     "LESSON_CHANGED": "Lesson changed", "COMPANY_CREATED": "Company created", "INVITE_CREATED": "Invite created",
     "INVITE_ACCEPTED": "Invite accepted", "INVITE_CANCELLED": "Invite cancelled", "MEMBER_REMOVED": "Member removed",
-    "BATCH_STARTED": "Bulk batch queued", "BATCH_DONE": "Bulk batch finished",
+    "REWRITE_SUGGESTED": "Wording suggestion created", "BATCH_STARTED": "Bulk batch queued", "BATCH_DONE": "Bulk batch finished",
 }
 DECISION_TEXT = {
     "AUTO_APPROVED": ("ok", "check-circle", "Every price matched the approved facts and nothing needed a person to check."),
@@ -1087,15 +1121,15 @@ DECISION_TEXT = {
 }
 
 
-def finding_html(f):
-    tone = {"FLAG": "bad", "SUPERVISION": "warn"}.get(f["status"], "ok")
+def finding_html(f, sid=None, rep=None, can_suggest=False):
+    tone = {"FLAG": "bad", "SUPERVISION": "warn", "NOTE": "neutral"}.get(f["status"], "ok")
     kind = f["type"]
     label = TYPE_LABEL.get(kind, kind.replace("_", " ").title())
     cap = f.get("source") == "caption"
     where = ("Post title or description" if cap else f'On screen at {fmt_time(f["time"])}' if f.get("source") == "screen"
              else f'Spoken at {fmt_time(f["time"])}')
-    status_chip = ui.badge("Needs a human check" if f["status"] == "SUPERVISION" else "Violation",
-                           tone, "alert" if tone == "warn" else "x-circle")
+    chip_txt = {"SUPERVISION": "Needs a human check", "NOTE": "Suggestion"}.get(f["status"], "Violation")
+    status_chip = ui.badge(chip_txt, tone, {"warn": "alert", "neutral": "info"}.get(tone, "x-circle"))
     conf = ""
     if f.get("confidence") is not None and not cap:
         conf = f' <span class="muted">Recognition confidence {round(float(f["confidence"]) * 100)}%</span>'
@@ -1103,11 +1137,23 @@ def finding_html(f):
     if kind in UNCERTAIN:
         note = ('<dt>Note</dt><dd>This is an uncertainty, not a confirmed violation. The amount may have been misheard or '
                 'a unit (lakh or crore) may be wrong, so a person should listen to this moment.</dd>')
+    sug = ""
+    if sid is not None and rep is not None and "i" in f and kind in SUGGESTABLE:
+        got = (rep.get("suggestions") or {}).get(str(f["i"]))
+        if got and got.get("rewrite"):
+            by = "Rule-based replacement" if got.get("by") == "rule" else "AI-written. Check it before using it."
+            sug = (f'<dt>Suggested wording</dt><dd><div class="muted">Instead of: {e(got["sentence"])}</div>'
+                   f'<div><b>{e(got["rewrite"])}</b></div><div class="muted">{by}</div></dd>')
+        elif got:
+            sug = f'<dt>Suggested wording</dt><dd class="muted">{e(got.get("error") or "No suggestion available.")}</dd>'
+        elif can_suggest:
+            sug = (f'<dt>Suggested wording</dt><dd><form method="post" action="/suggest/{sid}/{f["i"]}" style="display:inline">'
+                   f'<button class="btn secondary sm" type="submit">Suggest compliant wording</button></form></dd>')
     return (f'<div class="finding {tone}"><div class="finding-top">{status_chip}<b>{e(label)}</b>{conf}</div>'
             f'<dl><dt>Where</dt><dd>{e(where)}</dd>'
             f'<dt>Detected</dt><dd>{e(str(f["evidence"]))}</dd>'
             f'<dt>Why it matters</dt><dd>{e(f["explanation"])}</dd>{note}'
-            f'<dt>What to do</dt><dd>{e(f["suggestion"])}</dd></dl></div>')
+            f'<dt>What to do</dt><dd>{e(f["suggestion"])}</dd>{sug}</dl></div>')
 
 
 VERDICT_BADGE = {
@@ -1313,6 +1359,7 @@ def view_submission(request: Request, sid: int):
     # ---- right column: grouped findings
     parts, clean = [], []
     used = set()
+    can_sug = (admin and s["brand_id"] == u["brand_id"]) or s["user_id"] == u["id"]
     claims = rep.get("claims", [])
     for title, test in SECTIONS:
         fs = [f for f in findings if test(f["type"])]
@@ -1329,14 +1376,14 @@ def view_submission(request: Request, sid: int):
                                  c["status"], ui.badge("Needs check", "warn", "alert"))])
             inner += ui.table(["Time", "Detected", "Compared with", "Approved", "Result"], crow, "Price claims")
             inner += '<p></p>'
-        inner += "".join(finding_html(f) for f in fs)
+        inner += "".join(finding_html(f, sid, rep, can_sug) for f in fs)
         if inner:
             parts.append(f'<h3 class="sec-title">{e(title)}</h3>{inner}')
         else:
             clean.append(title.lower())
     other = [f for f in findings if id(f) not in used]
     if other:
-        parts.append('<h3 class="sec-title">Other checks</h3>' + "".join(finding_html(f) for f in other))
+        parts.append('<h3 class="sec-title">Other checks</h3>' + "".join(finding_html(f, sid, rep, can_sug) for f in other))
     if not findings and not claims:
         parts.append(ui.empty("No issues found", "Nothing in this video broke a rule."))
     if clean and (findings or claims):
@@ -1732,6 +1779,8 @@ RULE_KINDS = [
     ("banned_phrases", "Banned phrases", "Claims creators must never make. Any match is a violation.", "e.g. guaranteed returns"),
     ("confidential", "Confidential terms", "Internal terms that must never be spoken or written. A match blocks approval and is redacted in transcripts.", "e.g. dealer commission"),
     ("allowed_contacts", "Approved contact numbers", "Other phone numbers or emails are sent to a person to check.", "e.g. 9999999999"),
+    ("terminology", "Preferred wording", "Words to avoid and what to say instead, written as: avoid => prefer. A match is shown as a suggestion only. It never rejects a video.", "e.g. cheap => affordable"),
+    ("avoid_tone", "Tone to avoid", "Pushy or hype words that do not fit the brand voice. A match is shown as a suggestion only.", "e.g. hurry up"),
     ("glossary", "Speech glossary", "Project names and key terms that help the speech recogniser spell things correctly. This does not create violations.", "e.g. Demo Heights"),
 ]
 
@@ -2792,6 +2841,107 @@ def bulk_view(request: Request, batch_id: int):
     return page(f"Batch #{batch_id}", body, u, "bulk", [("Bulk Upload", "/bulk"), (f"Batch #{batch_id}", None)], request)
 
 
+# ============================================================ suggested wording
+@app.post("/suggest/{sid}/{i}")
+def suggest_wording(request: Request, sid: int, i: int):
+    u, s = me(request), get_sub(sid)
+    if not (u and s and can_view(u, s)):
+        return RedirectResponse("/", 303)
+    rep = rep_of(s)
+    fs = rep.get("findings", [])
+    if not (0 <= i < len(fs)) or fs[i]["type"] not in SUGGESTABLE:
+        return RedirectResponse(f"/s/{sid}", 303)
+    sugg = rep.setdefault("suggestions", {})
+    if str(i) in sugg:
+        return RedirectResponse(f"/s/{sid}", 303)
+    if len(sugg) >= 10:
+        request.session["flash"] = "Enough suggestions for this video. Fix these first."
+        return RedirectResponse(f"/s/{sid}", 303)
+    f = fs[i]
+    reg = json.loads(q("SELECT registry FROM brands WHERE id=?", (s["brand_id"],))[0]["registry"])
+    sentence = LRN._sentence_for(rep, f)
+    if not sentence:
+        sugg[str(i)] = {"sentence": "", "rewrite": None, "error": "The original sentence is not available.", "by": "none"}
+    elif f["type"] == "TERMINOLOGY":
+        prefer = ""
+        for rule in reg.get("terminology", []):
+            a_, _, b_ = norm(rule).partition("=>")
+            if a_.strip().lower() == str(f["evidence"]).lower():
+                prefer = b_.strip()
+        text = RW.replace_term(sentence, str(f["evidence"]), prefer)
+        sugg[str(i)] = {"sentence": sentence, "rewrite": text, "by": "rule",
+                        "error": None if text else "No preferred wording is set for this term."}
+    else:
+        text, err = RW.ai_rewrite(sentence, str(f["evidence"]), f["explanation"], reg)
+        sugg[str(i)] = {"sentence": sentence, "rewrite": text, "by": "ai", "error": err}
+    ex("UPDATE submissions SET report=? WHERE id=?", (json.dumps(rep, ensure_ascii=False), sid))
+    log(sid, u["name"], "REWRITE_SUGGESTED", f"Finding {i}: {f['type']}", s["brand_id"])
+    return RedirectResponse(f"/s/{sid}", 303)
+
+
+# ============================================================ replay: before and after lessons
+def replay_status(s, use_lessons):
+    old = rep_of(s)
+    inp = old.get("inputs", {})
+    reg = json.loads(q("SELECT registry FROM brands WHERE id=?", (s["brand_id"],))[0]["registry"])
+    user = q("SELECT * FROM users WHERE id=?", (s["user_id"],))[0]
+    screen = None
+    if inp.get("screen") is not None and old.get("screen_meta"):
+        screen = {"lines": [{"start": l["start"], "end": l["end"], "text": l["text"], "raw": l.get("raw", l["text"]),
+                             "conf": l["conf"]} for l in inp["screen"]], **old["screen_meta"]}
+    rep = analyze(user, s["brand_id"], inp.get("segments", []), inp.get("caption", ""), reg,
+                  confirmed=old.get("project_ids") or None, is_link=bool(s["source_url"]), screen=screen,
+                  use_lessons=use_lessons)
+    return status_of(rep)
+
+
+def replay(brand_id, limit=60):
+    """Re-run stored disputed videos with lessons off and on. Nothing is saved."""
+    rows = q("""SELECT * FROM submissions WHERE brand_id=? AND dispute_note IS NOT NULL
+                AND status IN ('APPROVED','REJECTED_FINAL') ORDER BY id DESC LIMIT ?""", (brand_id, limit))
+    out = []
+    for s in rows:
+        old = rep_of(s)
+        learnable = any(f["type"] in LRN.LEARNABLE for f in old.get("findings", []))
+        try:
+            before, after = replay_status(s, False), replay_status(s, True)
+        except Exception:
+            before = after = "ERROR"
+        out.append({"id": s["id"], "file": s["filename"], "overturned": s["status"] == "APPROVED",
+                    "learnable": learnable, "before": before, "after": after})
+    rej = ("REJECTED", "BLOCKED")
+    ov = [r for r in out if r["overturned"]]
+    up = [r for r in out if not r["overturned"]]
+    return {"rows": out,
+            "overturned": len(ov), "overturned_wording": sum(1 for r in ov if r["learnable"]),
+            "rejected_before": sum(1 for r in ov if r["before"] in rej),
+            "cleared": sum(1 for r in ov if r["before"] in rej and r["after"] not in rej),
+            "upheld": len(up), "wrongly_cleared": sum(1 for r in up if r["before"] in rej and r["after"] not in rej)}
+
+
+@app.get("/admin/learned/replay", response_class=HTMLResponse)
+def learned_replay(request: Request):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    r = replay(u["brand_id"])
+    rows = [[f'<a href="/s/{x["id"]}">#{x["id"]}</a> {e(x["file"] or "")}', "Overturned" if x["overturned"] else "Upheld",
+             "Yes" if x["learnable"] else "No (price or fact)", ui.chip(x["before"]) if x["before"] in ui.STATUS else e(x["before"]),
+             ui.chip(x["after"]) if x["after"] in ui.STATUS else e(x["after"])] for x in r["rows"]]
+    stats = (f'<p>Of <b>{r["overturned"]}</b> disputes you overturned, <b>{r["rejected_before"]}</b> are still rejected without lessons. '
+             f'With lessons, <b>{r["cleared"]}</b> of those now clear.</p>'
+             f'<p>Of <b>{r["upheld"]}</b> disputes you upheld (the rejection was right), <b>{r["wrongly_cleared"]}</b> would wrongly clear. '
+             f'This number should always be 0.</p>'
+             f'<p class="muted">Only wording mistakes can be learned. Price and fact disputes are never cleared by lessons. '
+             f'This replay re-runs the stored transcripts with the current rules and saves nothing.</p>')
+    table = (ui.table(["Video", "Your decision", "Wording issue?", "Without lessons", "With lessons"], rows, "Replay")
+             if rows else ui.empty("No resolved disputes yet", "Resolve a dispute first, then replay it here."))
+    body = (ui.page_header("Replay disputed videos", "Measures what the lessons change, using your own past decisions.")
+            + '<div class="stack">' + ui.card("Result", stats) + ui.card("Videos", table)
+            + '<p><a class="btn secondary" href="/admin/learned">Back to Lessons</a></p></div>')
+    return page("Replay", body, u, "learned", [("Lessons", "/admin/learned"), ("Replay", None)], request)
+
+
 # ============================================================ lessons
 @app.get("/admin/learned", response_class=HTMLResponse)
 def learned_page(request: Request):
@@ -2822,7 +2972,9 @@ def learned_page(request: Request):
                        "A lesson clears a flag only when the same phrase appears with the same harmless cue words. "
                        "Anything new still goes to a person or is flagged.", "info", "How this works.")
             + ui.card("Impact", f'<p><b>{st["lessons"]}</b> lessons, <b>{st["active"]}</b> active. '
-                      f'<b>{st["cleared"]}</b> flags cleared across <b>{st["videos"]}</b> videos.</p>')
+                      f'<b>{st["cleared"]}</b> flags cleared across <b>{st["videos"]}</b> videos.</p>'
+                      f'<p class="muted">AI lesson summaries: {"on" if os.environ.get("GROQ_API_KEY") else "off (lessons use a plain summary and may need your approval)"}.</p>'
+                      '<p><a class="btn secondary sm" href="/admin/learned/replay">Replay disputed videos</a></p>')
             + ui.card("Lessons", table) + "</div>")
     return page("Lessons", body, u, "learned", [("Lessons", None)], request)
 
