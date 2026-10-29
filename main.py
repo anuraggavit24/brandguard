@@ -2053,8 +2053,13 @@ def setup_checklist(u, brand):
     if all(s[0] for s in steps):
         return ""
     done = sum(1 for s in steps if s[0])
+    def _step_link(ok, href, btn):
+        if ok:
+            return ""
+        return f'<a class="btn secondary sm" style="margin-top:8px" href="{href}">{e(btn)}</a>'
+
     items = "".join(f'<li class="{"done" if ok else ""}"><span class="dot">{"✓" if ok else n}</span><div><b>{e(t)}</b>'
-                    f'<div class="muted">{e(d)}</div>{"" if ok else f"<a class=\"btn secondary sm\" style=\"margin-top:8px\" href=\"{href}\">{e(btn)}</a>"}</div></li>'
+                    f'<div class="muted">{e(d)}</div>{_step_link(ok, href, btn)}</div></li>'
                     for n, (ok, t, d, href, btn) in enumerate(steps, 1))
     return (f'<section class="card" aria-labelledby="gs"><div class="card-head"><h2 id="gs">Get started: {done} of {len(steps)} done</h2>'
             f'<span><button type="button" class="btn secondary sm" data-tour-start>Take the tour</button> '
