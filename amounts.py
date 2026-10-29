@@ -100,7 +100,9 @@ POINT = {"point", "dot", "पॉइंट", "पॉईंट", "पॉइन्�
 
 # multipliers (a few spellings plus inflected endings such as लाखा, लाखांपर्यंत, lakhon)
 _MULT_EXACT = {"hundred": HUNDRED, "sau": HUNDRED, "सौ": HUNDRED, "शंभर": HUNDRED, "shambhar": HUNDRED, "सो": HUNDRED,
-               "thousand": THOUSAND, "k": THOUSAND, "cr": CRORE}
+               "thousand": THOUSAND, "k": THOUSAND, "cr": CRORE,
+               # लाख misheard without the aspirate; exact words only, so लाकूड (wood) is not a lakh
+               _norm("लाक"): LAKH, _norm("लाका"): LAKH, _norm("लाकं"): LAKH}
 _MULT_STEMS = [("हजार", THOUSAND), ("हज़ार", THOUSAND), ("hazar", THOUSAND), ("hazaar", THOUSAND), ("hajar", THOUSAND),
                ("thousand", THOUSAND), ("लाख", LAKH), ("lakh", LAKH), ("laakh", LAKH), ("lac", LAKH),
                ("कोटी", CRORE), ("कोटि", CRORE), ("करोड", CRORE), ("करोड़", CRORE), ("crore", CRORE), ("koti", CRORE),
@@ -108,7 +110,7 @@ _MULT_STEMS = [("हजार", THOUSAND), ("हज़ार", THOUSAND), ("haza
 _MULT_STEMS = [(_norm(s), m) for s, m in _MULT_STEMS]
 _HUNDRED_SUFFIX = re.compile(r"^(.+?)(शे|शें|she|shey|sho)$")
 
-_CUR_STEMS = ("रुपय", "rupat", "rupyan", "rupai", "रुपए", "रुपये", "रुपया", "रू", "rupee", "rupay", "rupaye", "rupaya", "rupe", "inr", "rs", "रु", "₹")
+_CUR_STEMS = ("रुपय", "रुपई","rupat", "rupyan", "rupai", "रुपए", "रुपये", "रुपया", "रू", "rupee", "rupay", "rupaye", "rupaya", "rupe", "inr", "rs", "रु", "₹")
 _PCT_WORDS = ("%", "percent", "percentage", "pct", "प्रतिशत", "टक्के", "टक्का", "टक्क्यांनी", "टक्क्यांचा", "फीसदी",
               "फ़ीसदी", "pratishat", "takke", "takka", "fisadi")
 _NON_MONEY_AFTER = {"sq", "sqft", "square", "feet", "foot", "फूट", "चौरस", "km", "किमी", "kg", "किलो", "mm", "gb", "mb",
