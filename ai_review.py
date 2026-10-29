@@ -88,6 +88,9 @@ def units_from(inputs):
     """The text units the reviewer reads: spoken lines (with recognition confidence) and the caption."""
     units = [{"src": "audio", "time": s.get("start", 0), "text": s.get("text", ""), "conf": float(s.get("conf", 1.0))}
              for s in inputs.get("segments", []) if (s.get("text") or "").strip()]
+    if not units:                      # posters, documents and web pages have no speech: read their text instead
+        units = [{"src": "screen", "time": l.get("start", 0), "text": l.get("text", ""), "conf": float(l.get("conf", 1.0))}
+                 for l in inputs.get("screen", []) if (l.get("text") or "").strip()][:150]
     cap = (inputs.get("caption") or "").strip()
     if cap:
         units.append({"src": "caption", "time": 0, "text": cap, "conf": 1.0})

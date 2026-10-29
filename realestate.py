@@ -29,6 +29,7 @@ CATEGORIES = {
     "bungalow": ("Bungalow", ["plot_sqft", "builtup_sqft", "bathrooms", "parking"]),
     "row_house": ("Row house", ["bhk", "plot_sqft", "builtup_sqft", "bathrooms", "parking"]),
     "plot": ("Residential plot", ["plot_sqft", "dimensions", "permitted_use"]),
+    "product": ("Product or variant", []),      # any other industry: a car model, a loan plan, a pack size
 }
 FIELD_LABEL = {
     "bhk": "BHK (number)", "carpet_sqft": "Carpet area (sq ft)", "builtup_sqft": "Built-up area (sq ft)",
@@ -267,8 +268,10 @@ def flag_affected(old_fact_id, reason):
 def fact_display(f):
     if f["value_num"] is not None:
         v = f["value_num"]
-        if f["key"] in ("price", "booking_amount"):
+        if f["key"] in ("price", "booking_amount") or f["unit"] == "INR":
             return fmt_money(v)
+        if f["unit"] == "%":
+            return f"{v:g}%"
         return f"{v:g}" + (f" {f['unit']}" if f["unit"] else "")
     return f["value_text"] or ""
 
@@ -342,7 +345,13 @@ def _contains(text_folded, name_folded):
     return re.search(r"(?<!\w)" + re.escape(name_folded) + r"(?!\w)", text_folded) is not None
 
 
-def identify(texts, projects, all_projects, hint_id=None):
+def _product_confirmed(p, e, joined):
+    if any(_fold(n) == _fold(p["official_name"]) for n in e["names"]) and len(_fold(p["official_name"])) >= 6:
+        return True
+    return any(len(_fold(u["label"])) >= 2 and _contains(joined, _fold(u["label"])) for u in unit_types(p["id"]))
+
+
+def identify(texts, projects, all_projects, hint_id=None, domain="property"):
     """texts = [(source, index, text)]. Returns dict with state and per-project evidence.
 
     projects     = projects the user is authorised for
@@ -417,6 +426,8 @@ def identify(texts, projects, all_projects, hint_id=None):
             res["note"] = "The project you selected is different from the project the content mentions."
         elif e["rera"] or e["locality"] or hint_id == pid:
             res["state"] = "MATCHED"
+        elif domain != "property" and _product_confirmed(next(p for p in all_projects if p["id"] == pid), e, joined):
+            res["state"] = "MATCHED"     # products have no RERA or locality: the full name, or a name plus a variant, is enough
         else:
             res["state"] = "LIKELY"
             res["note"] = "The project name was heard, but nothing else confirms it."
@@ -487,10 +498,10 @@ def _state_claim(state, detail, kind, project, where, src, heard, norm_v, rule, 
                   "Ask the project manager to verify the stored value.", rule=rule)
 
 
-def check_price(project, text, t, src, conf, threshold, used):
+def check_price(project, text, t, src, conf, threshold, used, skip=None):
     out = []
     low = _fold(text)
-    prices = extract_prices(text)
+    prices = [p for p in extract_prices(text) if not skip or float(p["value"]) not in skip]
     if not prices:
         return out
     bhk = _bhk_in(text)
@@ -813,16 +824,29 @@ def _split_caption(text):
     return parts or ([text] if text else [])
 
 
-def validate(texts_by_project, projects_all, threshold):
-    """texts_by_project = {project_id: [(src, t, conf, text)]}. Returns (claims, used_facts)."""
+def validate(texts_by_project, projects_all, threshold, domain="property"):
+    """texts_by_project = {project_id: [(src, t, conf, text)]}. Returns (claims, used_facts).
+    Every company gets the price check and its own fact types (generic.py). Property checks (area, bathrooms,
+    possession, RERA, offers, travel time) run only for property companies."""
+    import generic, sys
     claims, used = [], []
     pmap = {p["id"]: p for p in projects_all}
+    defs_cache = {}
     for pid, items in texts_by_project.items():
         p = pmap.get(pid)
         if not p:
             continue
+        if p["brand_id"] not in defs_cache:
+            defs_cache[p["brand_id"]] = generic.list_defs(p["brand_id"])
+        defs = defs_cache[p["brand_id"]]
         for src, t, conf, text in items:
-            claims += check_price(p, text, t, src, conf, threshold, used)
+            consumed = set()
+            if defs:
+                gc, consumed = generic.check(p, defs, text, t, src, conf, used, sys.modules[__name__])
+                claims += gc
+            claims += check_price(p, text, t, src, conf, threshold, used, consumed)
+            if domain != "property":
+                continue
             claims += check_area(p, text, t, src, conf, used)
             claims += check_bathrooms(p, text, t, src, conf, used)
             claims += check_possession(p, text, t, src, conf, used)

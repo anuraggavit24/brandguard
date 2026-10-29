@@ -147,8 +147,10 @@ def email_taken(email):
 
 def _new_registry(company, industry=""):
     import packs
+    prop = industry == "real_estate"
     reg = {"brand": company, "banned_phrases": [], "confidential": [], "allowed_contacts": [],
-           "glossary": [company, "RERA", "BHK", "possession", "crore", "lakh", "कोटी", "लाख"]}
+           "domain": "property" if prop else "general",
+           "glossary": [company] + (["RERA", "BHK", "possession"] if prop else []) + ["crore", "lakh", "कोटी", "लाख"]}
     packs.apply(reg, [industry] if industry else [])
     return reg
 

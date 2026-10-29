@@ -71,7 +71,7 @@ with TestClient(main.app) as c:
     r = c.post("/bulk", data={"brand_id": "1", "language": "en", "project_id": ""}, files=files(main.BULK_MAX_FILES + 1))
     check("too many files refused", "at most" in r.text)
     r = c.post("/bulk", data={"brand_id": "1", "language": "en", "project_id": ""},
-               files=[("files", ("a.txt", b"hello", "text/plain"))])
+               files=[("files", ("a.exe", b"MZ", "application/octet-stream"))])
     check("wrong file type refused", "None of the files" in r.text)
     r = c.post("/bulk", data={"brand_id": "1", "language": "en", "project_id": ""},
                files=files(1) + [("files", ("a.txt", b"hello", "text/plain"))], follow_redirects=False)

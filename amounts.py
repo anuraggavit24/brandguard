@@ -108,7 +108,7 @@ _MULT_STEMS = [("हजार", THOUSAND), ("हज़ार", THOUSAND), ("haza
 _MULT_STEMS = [(_norm(s), m) for s, m in _MULT_STEMS]
 _HUNDRED_SUFFIX = re.compile(r"^(.+?)(शे|शें|she|shey|sho)$")
 
-_CUR_STEMS = ("रुपय", "रुपए", "रुपये", "रुपया", "रू", "rupee", "rupay", "rupaye", "rupaya", "rupe", "inr", "rs", "रु", "₹")
+_CUR_STEMS = ("रुपय", "rupat", "rupyan", "rupai", "रुपए", "रुपये", "रुपया", "रू", "rupee", "rupay", "rupaye", "rupaya", "rupe", "inr", "rs", "रु", "₹")
 _PCT_WORDS = ("%", "percent", "percentage", "pct", "प्रतिशत", "टक्के", "टक्का", "टक्क्यांनी", "टक्क्यांचा", "फीसदी",
               "फ़ीसदी", "pratishat", "takke", "takka", "fisadi")
 _NON_MONEY_AFTER = {"sq", "sqft", "square", "feet", "foot", "फूट", "चौरस", "km", "किमी", "kg", "किलो", "mm", "gb", "mb",

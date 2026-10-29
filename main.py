@@ -18,13 +18,17 @@ from urllib.parse import quote, urlparse
 
 import requests
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
 
 import accounts as ACC
 import jobs as JOBS
 import learning as LRN
 import ai_review as AIR
+import generic as GEN
+import importer as IMP
+import formats as FMT
+import assets as AST
 import mailer
 import packs
 import rewrite as RW
@@ -48,7 +52,8 @@ MAX_SECONDS = 180
 VOICE_MIN_AVG = float(os.environ.get("VOICE_MIN_AVG", "0.6"))
 VOICE_MAX_LOW = float(os.environ.get("VOICE_MAX_LOW", "0.4"))
 THRESHOLD = 0.65
-ALLOWED = {".mp4", ".mov", ".mkv", ".webm", ".m4a", ".mp3", ".wav", ".aac", ".ogg"}
+AV_EXT = {".mp4", ".mov", ".mkv", ".webm", ".m4a", ".mp3", ".wav", ".aac", ".ogg"}
+ALLOWED = AV_EXT | FMT.IMAGE_EXT | FMT.DOC_EXT
 LINK_HOSTS = ("youtube.com", "youtu.be", "instagram.com", "facebook.com", "fb.watch")
 DEMO = {"admin": 1, "partner": 2, "fvideoancer": 3}
 ROLE_LABEL = {"admin": "Builder / Brand Manager", "submitter": "Creator / Partner"}
@@ -151,6 +156,8 @@ RE.setup(DB_PATH)
 RE.seed_if_empty()
 LRN.setup(DB_PATH)
 AIR.setup(DB_PATH)
+GEN.setup(DB_PATH)
+IMP.setup(DB_PATH)
 ACC.setup(DB_PATH)
 JOBS.setup(DB_PATH)
 
@@ -432,12 +439,12 @@ def submit_form(request: Request):
     file_form = f"""
     <form method="post" action="/upload" enctype="multipart/form-data" data-lock>
       <div class="dropzone" id="dropzone">{ui.icon("upload", 32)}
-        <p><b>Drag a video or audio file here</b></p>
+        <p><b>Drag a video, audio, poster, image or document here</b></p>
         <p class="muted">Accepted: {", ".join(x.lstrip(".") for x in sorted(ALLOWED))}. Up to {MAX_MB} MB.
         The first {MAX_SECONDS // 60} minutes are reviewed.</p>
         <label class="btn secondary" for="file">Browse files</label>
         <input id="file" type="file" name="file" required data-max="{MAX_MB * 1024 * 1024}" data-ext="{exts}"
-               accept="video/*,audio/*" aria-describedby="file-err"></div>
+               accept="video/*,audio/*,image/png,image/jpeg,image/webp,.pdf,.docx,.txt" aria-describedby="file-err"></div>
       <div class="picked" id="picked">{ui.icon("file", 18)}<b id="picked-name"></b><span class="sp"></span>
         <button type="button" class="btn secondary sm" id="remove-file">Remove</button></div>
       <p class="req" id="file-err" role="alert" hidden></p>
@@ -462,7 +469,17 @@ def submit_form(request: Request):
             "Link checking is switched off on this hosted demo, because YouTube, Instagram and Facebook block automated "
             "downloads from shared cloud servers. It works in the local build on a laptop or desktop. To check a posted video "
             "here, download it and use <b>Upload a file</b>.", "warn", "Links are unavailable here.")
-    body = (ui.page_header("Submit a Video for Review",
+    page_form = f"""
+    <form method="post" action="/upload_page" data-lock style="margin-top:22px">
+      <label for="purl">Link to a blog post or web page</label>
+      <input id="purl" type="url" name="url" required placeholder="https://www.example.com/blog/new-launch">
+      <p class="hint">The page's text is read and checked like a document: prices, banned claims, product facts and wording.
+      Only public pages can be read.</p>
+      {company}
+      <button class="btn" type="submit" data-busy-label="Reading...">Check this page</button>
+    </form>"""
+    link_form = link_form + page_form
+    body = (ui.page_header("Submit Content for Review",
                            "BrandGuard listens to the video, checks every price and claim against the brand's approved facts "
                            "and shows you the result. Anything uncertain goes to a person for a decision.")
             + ui.alert("This demo runs on a free Render server with very little CPU and memory. To review a video, BrandGuard turns the speech into text and then reads every frame of the video, so it can take a few minutes. The first request after a quiet period is slower still, because the server has to wake up. Please keep this page open until the result appears. On a normal server the same review takes seconds. Short videos (under 15 seconds) are quickest.", "warn", "Please be patient: free server.")
@@ -503,11 +520,13 @@ def help_page(request: Request):
               <li>Banned claims and confidential company terms.</li>
               <li>Phone numbers and emails that are not on the approved contact list.</li>
               <li>Comparative or urgency claims that need evidence, such as "lowest price" or "limited units".</li>
-              <li>For linked posts, the title and description as well as the audio.</li></ul>""")
+              <li>For linked posts, the title and description as well as the audio.</li>
+              <li>Posters, banners and images (text read from the image), documents (PDF, Word, text) and blog pages.</li>
+              <li>For images: text contrast, text size, brand colours and the brand logo, when the company has set them.</li>
+              <li>The company's own product facts, such as discounts, warranties, fees, rates and dates.</li></ul>""")
             + ui.card("What each status means", ui.table(["Status", "Meaning"], legend, "Status meanings"))
-            + ui.card("Not yet available", """<p class="muted" style="margin:0">Reading on-screen text, comparing spoken and
-              written prices, poster review, RERA and possession-date verification and email sign-in are planned. They are not
-              part of reviews today.</p>""")
+            + ui.card("Not available", """<p class="muted" style="margin:0">Checking a RERA number against the official
+              register, identifying fonts, and finding a logo that has been redrawn or heavily recoloured.</p>""")
             + '</div>')
     return page("Help and Guidelines", body, u, "help", [("Help and Guidelines", None)], request)
 
@@ -515,7 +534,8 @@ def help_page(request: Request):
 def save_upload(up: UploadFile):
     ext = Path(up.filename or "").suffix.lower()
     if ext not in ALLOWED:
-        raise ValueError("Unsupported file type. Please upload a video or audio file (mp4, mov, m4a, wav...).")
+        raise ValueError("Unsupported file type. Upload a video or audio file (mp4, mov, m4a, wav...), an image "
+                         "(png, jpg, webp) or a document (pdf, docx, txt).")
     dst = UPLOAD_DIR / (uuid.uuid4().hex + ext)
     h = hashlib.sha256()
     size = 0
@@ -578,7 +598,7 @@ def fetch_link(url: str):
     if not info:
         raise RuntimeError("This video is longer than 5 minutes or larger than the size limit, "
                            "so it was not fetched. Please upload a shorter file.")
-    files = [f for f in UPLOAD_DIR.glob(stem + ".*") if f.suffix.lower() in ALLOWED]
+    files = [f for f in UPLOAD_DIR.glob(stem + ".*") if f.suffix.lower() in AV_EXT]
     if not files:
         raise RuntimeError(fail)
     path = files[0]
@@ -719,7 +739,8 @@ def transcribe_file(src: Path, lang: str, glossary):
 
         
 
-def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_link=False, screen=None, use_lessons=True):
+def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_link=False, screen=None, use_lessons=True,
+            kind="video"):
     """Rules plus project-aware claim checks. Never approves anything it could not fully check."""
     rep = review(segs, reg, THRESHOLD, check_prices=False)
     caption_parts = RE._split_caption(caption) if caption.strip() else []
@@ -759,7 +780,7 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
         idres = {"state": "CONFIRMED", "project_ids": list(confirmed), "evidence": {}, "out_of_scope": [],
                  "segments": {}, "note": "Project confirmed by the submitter."}
     else:
-        idres = RE.identify(texts, authorised, all_p, hint_pid)
+        idres = RE.identify(texts, authorised, all_p, hint_pid, reg.get("domain", "property"))
     state = idres["state"]
     names = {p["id"]: p["official_name"] for p in all_p}
     rep["identity"] = {"state": state, "project_ids": idres["project_ids"], "note": idres["note"],
@@ -774,6 +795,7 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
     if screen is not None:
         rep["screen_meta"] = {"frames": screen.get("frames", 0), "total": screen.get("total", 0), "partial": bool(screen.get("partial"))}
     rep["policy"] = RE.POLICY_VERSION
+    rep["kind"] = kind
     rep["claims"], rep["facts_used"] = [], []
     rep["needs_confirmation"] = state in ("LIKELY", "AMBIGUOUS", "NOT_FOUND", "CONFLICT") and bool(segs or caption.strip())
     rep["candidates"] = [p["id"] for p in authorised] if state in ("NOT_FOUND",) else list(idres["project_ids"])
@@ -799,7 +821,7 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
 
     if not rep["needs_confirmation"] and idres["project_ids"]:
         by_proj, unassigned = RE.assign_segments(segs, caption_parts, idres, all_p, screen_lines)
-        claims, used = RE.validate(by_proj, all_p, THRESHOLD)
+        claims, used = RE.validate(by_proj, all_p, THRESHOLD, reg.get("domain", "property"))
         rep["claims"], rep["facts_used"] = claims, used
         for c in claims:
             if c["verdict"] != RE.VERIFIED:
@@ -813,17 +835,27 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
 
     rep["passed"] = sum(1 for c in rep["claims"] if c["verdict"] == RE.VERIFIED)
     speech = bool(segs)
-    checks.append(("Spoken claims", "done" if speech else "incomplete",
-                   "Speech transcribed and checked." if speech else "No speech could be detected, so spoken claims were not checked."))
+    if kind == "video":
+        checks.append(("Spoken claims", "done" if speech else "incomplete",
+                       "Speech transcribed and checked." if speech else "No speech could be detected, so spoken claims were not checked."))
+    else:
+        n_lines = len(screen_lines)
+        what = {"image": "Text in the image", "document": "Text in the document"}.get(kind, "Text")
+        checks.append((what, "done" if n_lines else "incomplete",
+                       f"{n_lines} line(s) of text read and checked." if n_lines else
+                       ("No text could be read." if screen is not None else "Text could not be read on this server (OCR unavailable).")))
     if is_link:
         has_cap = bool(caption.strip())
         checks.append(("Post title and description", "done" if has_cap else "incomplete",
                        "Checked." if has_cap else "No title or description was available."))
-    checks.append(("Project facts (price, area, bathrooms, possession, RERA, offers, distance)",
+    checks.append(("Project facts (price, area, bathrooms, possession, RERA, offers, distance)"
+                   if reg.get("domain", "property") == "property" else "Product facts (price and your own fact types)",
                    "done" if not rep["needs_confirmation"] and idres["project_ids"] else "pending",
                    "Checked against the approved facts of the identified project."
                    if idres["project_ids"] and not rep["needs_confirmation"] else "Waiting for the project to be confirmed."))
-    if screen is None:
+    if kind != "video":
+        pass
+    elif screen is None:
         checks.append(("On-screen text", "not_available",
                        "Not analysed. This file has no video, or on-screen reading was off or unavailable."))
     elif screen.get("partial"):
@@ -845,16 +877,21 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
             "voice: " + ", ".join(fmt_money(v) for v in sorted(spoken_p)) + " / screen: " + ", ".join(fmt_money(v) for v in sorted(shown_p)),
             "The price spoken in the video is different from the price shown on screen.",
             "Make the voice and the on-screen price the same, and match the approved price."))
-    checks.append(("Voice versus screen", "done" if (spoken_p and shown_p) else "incomplete",
-                   "Spoken and on-screen prices compared." if (spoken_p and shown_p)
-                   else "Needs both a spoken price and an on-screen price to compare."))
+    if kind == "video":
+        checks.append(("Voice versus screen", "done" if (spoken_p and shown_p) else "incomplete",
+                       "Spoken and on-screen prices compared." if (spoken_p and shown_p)
+                       else "Needs both a spoken price and an on-screen price to compare."))
     checks.append(("RERA authoritative verification", "not_available",
                    "Not available. A RERA number is only compared with the BrandGuard registry unless an administrator has recorded an official check."))
     rep["checks"] = checks
 
     if use_lessons:
         apply_lessons(rep, brand_id)
-    if not segs:
+    if kind != "video" and not screen_lines:
+        rep["findings"].append(make_finding(
+            "SUPERVISION", "MEDIUM", "NO_TEXT_FOUND", 0, "-",
+            "No text could be read from this file, so nothing was checked.", "A person should look at the file."))
+    elif kind == "video" and not segs:
         rep["findings"].append(make_finding(
             "SUPERVISION", "MEDIUM", "NO_SPEECH_DETECTED", 0, "-",
             "No speech could be detected in this file.", "A human should check the file."))
@@ -961,9 +998,23 @@ def review_submission(u, brand_id, path, sha, filename, language, source_url=Non
     if hint_pid and not RE.can_use_project(u["id"], hint_pid):
         return None, "You do not have access to that project."
     try:
-        segs = transcribe_file(path, language, glossary_for(reg, brand_id, u["id"]))
-        screen = None if source_url else OCR.read_screen(path, MAX_SECONDS)
-        rep = analyze(u, brand_id, segs, caption, reg, hint_pid, is_link=bool(source_url), screen=screen)
+        kind = FMT.kind_of(path)
+        if kind == "image":
+            segs, lines = [], FMT.read_image(path)
+            screen = {"lines": lines, "frames": 1, "total": 1, "partial": False} if lines is not None else None
+        elif kind == "document":
+            segs = []
+            screen = {"lines": FMT.read_document(path), "frames": 0, "total": 0, "partial": False}
+        else:
+            segs = transcribe_file(path, language, glossary_for(reg, brand_id, u["id"]))
+            screen = None if source_url else OCR.read_screen(path, MAX_SECONDS)
+        rep = analyze(u, brand_id, segs, caption, reg, hint_pid, is_link=bool(source_url) and kind == "video", screen=screen,
+                      kind=kind)
+        if kind == "image" and screen is not None:
+            af, ac = AST.check_image(path, screen["lines"], reg, make_finding)
+            rep["findings"] += af
+            rep["checks"] += ac
+            finish_report(rep)
         add_ai_review(rep, brand_id, reg)
     except Exception as ex_:
         msg = str(ex_) if isinstance(ex_, (ValueError, RuntimeError)) else "Something went wrong while reviewing this file."
@@ -1028,7 +1079,17 @@ async def confirm_project(request: Request, sid: int):
     if scr_old is not None and old.get("screen_meta"):
         screen = {"lines": [{"start": l["start"], "end": l["end"], "text": l["text"], "raw": l.get("raw", l["text"]),
                              "conf": l["conf"]} for l in scr_old], **old["screen_meta"]}
-    rep = analyze(u, s["brand_id"], segs, caption, reg, confirmed=ids, is_link=bool(s["source_url"]), screen=screen)
+    kind = old.get("kind", "video")
+    if kind != "video" and screen is None and scr_old is not None:
+        screen = {"lines": [{"start": l["start"], "end": l["end"], "text": l["text"], "raw": l.get("raw", l["text"]),
+                             "conf": l["conf"]} for l in scr_old], "frames": 1, "total": 1, "partial": False}
+    rep = analyze(u, s["brand_id"], segs, caption, reg, confirmed=ids, is_link=bool(s["source_url"]) and kind == "video",
+                  screen=screen, kind=kind)
+    keep = [f for f in old.get("findings", []) if f["type"] in ("LOW_CONTRAST", "SMALL_TEXT", "OFF_PALETTE", "LOGO_MISSING")]
+    if keep:
+        rep["findings"] += keep
+        rep["checks"] += [c for c in old.get("checks", []) if c[0] in ("Text contrast and size", "Brand colours", "Brand logo")]
+        finish_report(rep)
     add_ai_review(rep, s["brand_id"], reg)
     if old.get("duplicate_of"):
         rep["duplicate_of"] = old["duplicate_of"]
@@ -1082,6 +1143,28 @@ def upload_link(request: Request, brand_id: int = Form(...), language: str = For
                       hint_pid=int(project_id) if project_id.isdigit() else None)
 
 
+@app.post("/upload_page")
+def upload_page(request: Request, brand_id: int = Form(...), url: str = Form(...), project_id: str = Form("")):
+    """A blog post or any public web page: its text is fetched and checked like a document."""
+    u = me(request)
+    if not u or u["role"] != "submitter":
+        return RedirectResponse("/", 303)
+    if not allowed_brand(u, brand_id):
+        return err_page(u, "You are not linked to that company.")
+    try:
+        title, desc, text = FMT.fetch_page(url)
+    except ValueError as ex_:
+        return err_page(u, str(ex_))
+    body = "\n\n".join(x for x in (title, desc, text) if x).strip()
+    if len(body) < 20:
+        return err_page(u, "Almost no text was found on that page.")
+    path = UPLOAD_DIR / (uuid.uuid4().hex + ".txt")
+    path.write_text(body, encoding="utf-8")
+    sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return run_review(u, brand_id, path, sha, (title or url)[:80], "auto", source_url=url.strip(),
+                      hint_pid=int(project_id) if project_id.isdigit() else None)
+
+
 # ------------------------------------------------------------- result / review
 TYPE_LABEL = {
     "PRICE_MISMATCH": "Price does not match the approved price",
@@ -1105,18 +1188,22 @@ TYPE_LABEL = {
     "UNAUTHORIZED_PROJECT": "Project this account cannot promote",
     "PROJECT_UNCERTAIN": "Could not link a claim to one project",
     "IDENTITY_WEAK": "Project not named in the content",
+    "CUSTOM_CHECK": "Product fact does not match the approved value",
+    "LOW_CONTRAST": "Text is hard to read (low contrast)", "SMALL_TEXT": "Text smaller than the brand minimum",
+    "OFF_PALETTE": "Colour outside the brand palette", "LOGO_MISSING": "Brand logo not found", "NO_TEXT_FOUND": "No text found",
     "TERMINOLOGY": "Preferred wording", "TONE": "Tone of voice", "SPEECH_UNCLEAR": "Speech was hard to recognise",
     "BANNED_PARAPHRASE": "Same meaning as a banned phrase (AI)", "AI_TONE": "Tone (AI review)",
     "AI_TERMINOLOGY": "Terminology (AI review)", "AI_CLARITY": "Hard to follow (AI review)",
     "AI_ADVICE": "Claim may need evidence (AI review)", "AI_LOWCONF": "Words that may be misheard (AI review)",
 }
-for _k in ("AREA", "BATHROOMS", "POSSESSION", "RERA", "OFFER", "DISTANCE", "BOOKING", "PRICE"):
+for _k in ("AREA", "BATHROOMS", "POSSESSION", "RERA", "OFFER", "DISTANCE", "BOOKING", "PRICE", "CUSTOM"):
     TYPE_LABEL[_k + "_UNVERIFIABLE"] = "No approved fact to compare with (not a confirmed error)"
 UNCERTAIN = {"PRICE_UNIT_CHECK", "PRICE_LOW_CONFIDENCE", "UNCLEAR_AMOUNT", "PRICE_NOT_IN_REGISTRY"}
 SECTIONS = [
     ("Price verification", lambda t: t.startswith("PRICE_") and not t.endswith("_UNVERIFIABLE") or t == "UNCLEAR_AMOUNT"),
+    ("Product facts (your own fact types: discount, warranty, fees, dates...)", lambda t: t.startswith("CUSTOM_")),
     ("Property facts (area, bathrooms, possession, RERA, offers, distance)",
-     lambda t: t.endswith("_CHECK") and not t.startswith("PRICE_") or t.endswith("_UNVERIFIABLE")),
+     lambda t: not t.startswith("CUSTOM_") and (t.endswith("_CHECK") and not t.startswith("PRICE_") or t.endswith("_UNVERIFIABLE"))),
     ("Project and permission", lambda t: t in ("UNAUTHORIZED_PROJECT", "PROJECT_UNCERTAIN", "IDENTITY_WEAK")),
     ("Restricted or banned language", lambda t: t == "BANNED_PHRASE"),
     ("Confidential information", lambda t: t == "CONFIDENTIAL_DATA"),
@@ -1126,6 +1213,7 @@ SECTIONS = [
     ("Wording and tone suggestions", lambda t: t in ("TERMINOLOGY", "TONE", "AI_TONE", "AI_TERMINOLOGY", "AI_CLARITY",
                                                      "AI_ADVICE", "AI_LOWCONF")),
     ("Speech clarity", lambda t: t == "SPEECH_UNCLEAR"),
+    ("Brand assets and accessibility", lambda t: t in ("LOW_CONTRAST", "SMALL_TEXT", "OFF_PALETTE", "LOGO_MISSING")),
 ]
 SUGGESTABLE = ("BANNED_PHRASE", "UNSUPPORTED_CLAIM", "TERMINOLOGY", "TONE")
 ACTION_LABEL = {
@@ -1143,7 +1231,8 @@ ACTION_LABEL = {
     "LESSON_LEARNED": "Lesson written from dispute", "LESSON_APPLIED": "Earlier decision applied",
     "LESSON_CHANGED": "Lesson changed", "COMPANY_CREATED": "Company created", "INVITE_CREATED": "Invite created",
     "INVITE_ACCEPTED": "Invite accepted", "INVITE_CANCELLED": "Invite cancelled", "MEMBER_REMOVED": "Member removed",
-    "REWRITE_SUGGESTED": "Wording suggestion created", "PACK_APPLIED": "Industry rules added", "AI_DISMISSED": "AI concern dismissed", "AI_BANNED": "AI concern added to banned phrases", "BATCH_STARTED": "Bulk batch queued", "BATCH_DONE": "Bulk batch finished",
+    "REWRITE_SUGGESTED": "Wording suggestion created", "PACK_APPLIED": "Industry rules added", "FACT_TYPE_SET": "Fact type saved", "FACT_TYPE_REMOVED": "Fact type removed",
+    "IMPORT_APPLIED": "Products and facts imported", "SAMPLE_LOADED": "Sample data loaded", "AI_DISMISSED": "AI concern dismissed", "AI_BANNED": "AI concern added to banned phrases", "BATCH_STARTED": "Bulk batch queued", "BATCH_DONE": "Bulk batch finished",
 }
 DECISION_TEXT = {
     "AUTO_APPROVED": ("ok", "check-circle", "Every price matched the approved facts and nothing needed a person to check."),
@@ -1152,7 +1241,7 @@ DECISION_TEXT = {
     "BLOCKED": ("bad", "x-circle", "Confidential company information was mentioned, so this cannot be approved. Remove it and resubmit."),
     "REJECTED_FINAL": ("bad", "x-circle", "A reviewer looked at this submission and upheld the rejection."),
     "NEEDS_CONFIRMATION": ("warn", "search", "BrandGuard is not certain which project this video is about, so it did not check prices against a guess. Choose the project below to continue."),
-    "SUPERVISION": ("warn", "alert", "BrandGuard could not be sure about some parts of this video, so a person must check it. This is not a confirmed violation."),
+    "SUPERVISION": ("warn", "alert", "BrandGuard could not be sure about some parts of this content, so a person must check it. This is not a confirmed violation."),
     "DISPUTED": ("warn", "scale", "The creator disagreed with the rejection. A reviewer must uphold or overturn it."),
 }
 
@@ -1166,6 +1255,9 @@ def finding_html(f, sid=None, rep=None, can_suggest=False, can_decide=False):
     cap = f.get("source") == "caption"
     where = ("Post title or description" if cap else f'On screen at {fmt_time(f["time"])}' if f.get("source") == "screen"
              else f'Spoken at {fmt_time(f["time"])}')
+    k_ = (rep or {}).get("kind", "video")
+    if k_ != "video" and f.get("source") == "screen":
+        where = {"image": "In the image", "document": "In the document"}.get(k_, "In the content")
     chip_txt = {"SUPERVISION": "Needs a human check", "NOTE": "Suggestion"}.get(f["status"], "Violation")
     if f.get("dismissed"):
         chip_txt = "Dismissed by a builder"
@@ -1213,7 +1305,7 @@ VERDICT_BADGE = {
     "INCOMPLETE": ("Incomplete", "warn", "alert"), "NA": ("Not applicable", "neutral", "info"),
 }
 KIND_LABEL = {"price": "Price", "booking": "Booking amount", "area": "Area", "bathrooms": "Bathrooms",
-              "possession": "Possession", "rera": "RERA", "offer": "Offer", "distance": "Distance"}
+              "possession": "Possession", "rera": "RERA", "offer": "Offer", "distance": "Distance", "custom": "Product fact"}
 IDENT_TEXT = {
     "MATCHED": ("ok", "Project identified from the content."), "CONFIRMED": ("ok", "Project confirmed by the submitter."),
     "MULTIPLE": ("info", "Several projects are mentioned. Each claim was checked against its own project."),
@@ -1268,8 +1360,11 @@ def checks_card(rep):
         return ""
     lab = {"done": ("Done", "ok", "check-circle"), "pending": ("Waiting", "warn", "clock"),
            "incomplete": ("Incomplete", "warn", "alert"), "not_available": ("Not performed", "neutral", "info")}
-    rows = [[e(n), ui.badge(*lab.get(st, lab["pending"])), e(note)] for n, st, note in chk]
-    return ui.card("What was and was not checked", ui.table(["Check", "State", "Detail"], rows, "Checks performed"),
+    items = "".join(f'<li style="padding:10px 0;border-bottom:1px solid var(--border, #e5e7eb)">'
+                    f'<div style="display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap">'
+                    f'<b>{e(n)}</b>{ui.badge(*lab.get(st, lab["pending"]))}</div>'
+                    f'<div class="muted" style="margin-top:4px">{e(note)}</div></li>' for n, st, note in chk)
+    return ui.card("What was and was not checked", f'<ul style="list-style:none;margin:0;padding:0">{items}</ul>',
                    f"Policy version {e(rep.get('policy', ''))}. A check that was not performed is never counted as passed.")
 
 
@@ -1368,9 +1463,12 @@ def view_submission(request: Request, sid: int):
     if s["source_url"]:
         src = (f'<dt>Source link</dt><dd><a href="{e(s["source_url"])}" target="_blank" rel="noopener noreferrer">'
                f'{e(s["source_url"])}</a></dd>')
-    details = ui.card("Submission details", f"""<dl class="kv"><dt>Video</dt><dd>{e(s["filename"] or "Untitled")}</dd>
+    ckind = rep.get("kind", "video")
+    klabel = {"image": "Image", "document": "Document" if not s["source_url"] else "Web page"}.get(ckind, "Video")
+    langrow = (f'<dt>Spoken language</dt><dd>{e(LANG_LABEL.get(s["language"], s["language"] or ""))}</dd>' if ckind == "video" else "")
+    details = ui.card("Submission details", f"""<dl class="kv"><dt>{klabel}</dt><dd>{e(s["filename"] or "Untitled")}</dd>
       <dt>Company</dt><dd>{e(s["bname"])}</dd><dt>Submitted by</dt><dd>{e(s["uname"])}</dd>
-      <dt>Submitted</dt><dd>{e(s["created_at"])}</dd><dt>Spoken language</dt><dd>{e(LANG_LABEL.get(s["language"], s["language"] or ""))}</dd>{src}</dl>"""
+      <dt>Submitted</dt><dd>{e(s["created_at"])}</dd>{langrow}{src}</dl>"""
                       + (ui.alert("This was fetched from a link. The platform's copy can differ from the original file, so the "
                                   "file-hash check does not apply to link submissions.", "info") if s["source_url"] else ""))
     tr = rep.get("transcript", [])
@@ -1383,6 +1481,8 @@ def view_submission(request: Request, sid: int):
         transcript = ui.card("Transcript and recognition confidence",
                              f'<p class="muted">Confidential terms are redacted. Highlighted lines had low recognition '
                              f'confidence and may contain mistakes.</p>{rows}')
+    elif ckind != "video":
+        transcript = ""
     else:
         transcript = ui.card("Transcript and recognition confidence", ui.empty("No transcript available"))
     scr_lines = rep.get("inputs", {}).get("screen") or []
@@ -1394,9 +1494,14 @@ def view_submission(request: Request, sid: int):
                 f'<span class="muted conf">{round(l["conf"] * 100)}%</span></div>' for l in scr_lines)
         else:
             srows = ui.empty("No text was found on screen")
-        transcript += ui.card("Text read from the screen",
-                              f'<p class="muted">{meta["frames"]} frames read (2 per second plus every scene change). '
-                              f'Each line is shown once, at the first time it appeared.</p>{srows}')
+        if ckind == "video":
+            transcript += ui.card("Text read from the screen",
+                                  f'<p class="muted">{meta["frames"]} frames read (2 per second plus every scene change). '
+                                  f'Each line is shown once, at the first time it appeared.</p>{srows}')
+        else:
+            transcript += ui.card("Text read from the image" if ckind == "image" else "Text of the document",
+                                  '<p class="muted">Each line that was checked. On posters, a price on its own line is joined '
+                                  'with the label above it, so it is checked against the right variant.</p>' + srows)
 
     cleared = rep.get("cleared") or []
     if cleared:
@@ -1886,8 +1991,66 @@ def rules_page(request: Request, err: str = ""):
                            "Changes apply to new submissions only.",
                            f'<a class="btn" href="/admin/guide">{ui.icon("upload", 16)}Import from PDF</a>')
             + '<div class="stack">' + (ui.alert(e(err), "bad") if err else "") + ui.card("", search)
-            + pack_card() + "".join(cards) + "</div>" + "".join(dialogs))
+            + pack_card() + assets_card(reg) + "".join(cards) + "</div>" + "".join(dialogs))
     return page("Brand Rules", body, u, "rules", [("Brand Rules", None)], request)
+
+
+def assets_card(reg):
+    c = AST.config(reg)
+    logo = ("Logo uploaded." if c.get("logo") and os.path.exists(c["logo"]) else "No logo uploaded.")
+    return ui.card("Brand assets and accessibility (images and posters)",
+                   f'<form method="post" action="/admin/assets" enctype="multipart/form-data" data-lock><div class="field-grid">'
+                   f'<div><label for="pal">Brand colours (hex)</label><input id="pal" name="palette" value="{e(", ".join(c["palette"]))}" '
+                   f'placeholder="#1F3A5F, #F2A900"></div>'
+                   f'<div><label for="mc">Minimum text contrast</label><input id="mc" name="min_contrast" value="{c["min_contrast"]:g}"></div>'
+                   f'<div><label for="mt">Smallest text (% of image height)</label><input id="mt" name="min_text_pct" value="{c["min_text_pct"]:g}"></div>'
+                   f'<div><label for="lg">Logo (PNG or JPG)</label><input id="lg" type="file" name="logo" accept="image/png,image/jpeg"></div></div>'
+                   f'<p><label><input type="checkbox" name="check_palette" value="1" {"checked" if c["check_palette"] else ""}> '
+                   f'Point out large areas in non-brand colours</label><br>'
+                   f'<label><input type="checkbox" name="require_logo" value="1" {"checked" if c["require_logo"] else ""}> '
+                   f'Every poster must show the logo</label></p>'
+                   f'<p class="hint">{logo} Contrast 4.5 is the WCAG level for normal text (large text needs 3). Fonts are not checked.</p>'
+                   f'<button class="btn" type="submit">Save brand assets</button></form>')
+
+
+@app.post("/admin/assets")
+async def save_assets(request: Request):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    f = await request.form()
+    reg = load_reg(u)
+    c = AST.config(reg)
+    try:
+        c["palette"] = AST.parse_palette(f.get("palette", ""))
+        c["min_contrast"] = min(21.0, max(1.0, float(f.get("min_contrast") or 4.5)))
+        c["min_text_pct"] = min(20.0, max(0.1, float(f.get("min_text_pct") or 1.2)))
+    except ValueError:
+        request.session["flash"] = "Contrast and text size must be numbers."
+        return RedirectResponse("/admin/rules", 303)
+    c["check_palette"] = bool(f.get("check_palette"))
+    c["require_logo"] = bool(f.get("require_logo"))
+    up = f.get("logo")
+    if up is not None and getattr(up, "filename", ""):
+        data = await up.read()
+        import cv2
+        import numpy as np
+        img = cv2.imdecode(np.frombuffer(data[:3 * 1024 * 1024], np.uint8), cv2.IMREAD_COLOR) if data else None
+        if img is None or len(data) > 3 * 1024 * 1024:
+            request.session["flash"] = "The logo must be a PNG or JPG image under 3 MB."
+            return RedirectResponse("/admin/rules", 303)
+        (DATA_DIR / "assets").mkdir(parents=True, exist_ok=True)
+        dst = DATA_DIR / "assets" / f"brand_{u['brand_id']}_logo.png"
+        cv2.imwrite(str(dst), img)               # re-encoded, so only pixels are kept
+        c["logo"] = str(dst)
+    if c["require_logo"] and not c.get("logo"):
+        c["require_logo"] = False
+        request.session["flash"] = "Upload a logo before making it required."
+    reg["assets"] = c
+    save_reg(u, reg)
+    log(None, u["name"], "RULE_CHANGED", "Brand assets and accessibility settings updated", u["brand_id"])
+    request.session.setdefault("flash", "Brand assets saved.")
+    return RedirectResponse("/admin/rules", 303)
 
 
 def pack_card():
@@ -2237,8 +2400,26 @@ def projects_page(request: Request):
            f'<div><label for="pa">Other names (one per line)</label><textarea id="pa" name="aliases" rows="3" '
            f'placeholder="Hindi, Marathi and short spellings"></textarea></div></div>'
            f'<button class="btn" type="submit">{ui.icon("plus", 16)}Add project</button></form>')
+    tools = ui.card("Set up faster", '<p class="muted">Fill our spreadsheet template, or upload a brochure or price list and let '
+                    'the AI propose the products and facts. Nothing is saved until you check it and confirm.</p>'
+                    '<a class="btn" href="/admin/import">Import spreadsheet or brochure</a> '
+                    '<a class="btn secondary" href="/admin/fact-types">Fact types</a> '
+                    '<form method="post" action="/admin/sample" style="display:inline" data-lock>'
+                    '<button class="btn secondary" type="submit">Load sample data</button></form>')
+    if load_reg(u).get("domain", "property") != "property":
+        prow = [[r_[0], r_[3], r_[4]] for r_ in rows]
+        add_g = (f'<form method="post" action="/admin/projects/add" data-lock><div class="field-grid">'
+                 f'<div><label for="pn">Product name</label><input id="pn" name="official_name" required maxlength="120"></div>'
+                 f'<div><label for="pa">Other names (one per line)</label><textarea id="pa" name="aliases" rows="3" '
+                 f'placeholder="Short names, Hindi or Marathi spellings"></textarea></div></div>'
+                 f'<button class="btn" type="submit">{ui.icon("plus", 16)}Add product</button></form>')
+        body = (ui.page_header("Products and Facts", "Every product, its variants and the approved facts that content is checked against.")
+                + '<div class="stack">' + tools
+                + ui.card("Products", ui.table(["Product", "Variants", ""], prow, "Products") if prow else ui.empty("No products yet"))
+                + ui.card("Add a product", add_g, "Other names help BrandGuard recognise the product in speech.") + "</div>")
+        return page("Products and Facts", body, u, "facts", [("Products and Facts", None)], request)
     body = (ui.page_header("Projects and Facts", "Every project, its property types and the approved facts that content is checked against.")
-            + '<div class="stack">'
+            + '<div class="stack">' + tools
             + ui.card("Projects", ui.table(["Project", "Location", "RERA", "Property types", ""], rows, "Projects") if rows else ui.empty("No projects yet"))
             + ui.card("Add a project", add, "Aliases help BrandGuard recognise the project in Hindi, Marathi or short forms.") + "</div>")
     return page("Projects and Facts", body, u, "facts", [("Projects and Facts", None)], request)
@@ -2260,7 +2441,8 @@ def project_add(request: Request, official_name: str = Form(""), short_name: str
 
 
 def fact_rows_html(pid, unit_id=None):
-    fs = RE._q("SELECT * FROM facts WHERE project_id=? AND " + ("unit_type_id=?" if unit_id else "unit_type_id IS NULL") + " ORDER BY key, id",
+    fs = RE._q("SELECT * FROM facts WHERE project_id=? AND key NOT LIKE 'g:%' AND "
+               + ("unit_type_id=?" if unit_id else "unit_type_id IS NULL") + " ORDER BY key, id",
                (pid, unit_id) if unit_id else (pid,))
     out = []
     for f in fs:
@@ -2271,7 +2453,9 @@ def fact_rows_html(pid, unit_id=None):
         if cur:
             end = (f'<form method="post" action="/admin/projects/{pid}/fact/end" style="display:inline"><input type="hidden" name="fact_id" value="{f["id"]}">'
                    f'<button class="btn secondary sm" type="submit">Withdraw</button></form>')
-        out.append([e(RE.FACT_LABEL.get(f["key"], f["key"].replace("offer:", "Offer: ").replace("landmark:", "Place: "))),
+        label = (f["key"][2:].capitalize() if f["key"].startswith("g:") else
+                 RE.FACT_LABEL.get(f["key"], f["key"].replace("offer:", "Offer: ").replace("landmark:", "Place: ")))
+        out.append([e(label),
                     e(RE.fact_display(f)), f'{e(f["valid_from"] or "")} to {e(f["valid_to"] or "open")}',
                     e(src[0]["title"] if src else "-"), state, end])
     return out
@@ -2284,6 +2468,7 @@ def project_detail(request: Request, pid: int):
     if not p:
         return RedirectResponse("/admin/projects", 303)
     heads = ["Fact", "Value", "Valid", "Source", "State", ""]
+    prop = load_reg(u).get("domain", "property") == "property"
     units_html = ""
     for ut in RE.unit_types(pid):
         cat = RE.CATEGORIES[ut["category"]][0]
@@ -2344,18 +2529,396 @@ def project_detail(request: Request, pid: int):
     alias_form = (f'<form method="post" action="/admin/projects/{pid}/alias" data-lock><label for="al">Add another name</label>'
                   f'<input id="al" name="alias" required maxlength="80" placeholder="Hindi, Marathi or short spelling"><br><br>'
                   f'<button class="btn" type="submit">Add name</button></form>')
-    body = (ui.page_header(p["official_name"], e(", ".join(x for x in (p["locality"], p["city"]) if x)),
-                           '<a class="btn secondary" href="/admin/projects">All projects</a>')
-            + '<div class="stack">'
-            + ui.card("Names BrandGuard listens for", "<p>" + e(" | ".join(names)) + "</p>" + alias_form)
-            + ui.card("RERA", rera_info + rera_form)
-            + ui.card("Project-wide facts", ui.table(heads, proj_facts, "Project facts") if proj_facts else ui.empty("None yet"))
-            + units_html
-            + ui.card("Add a property type", unit_form, "Apartment, penthouse, villa, bungalow, row house or plot.")
-            + ui.card("Add or change a fact", fact_form, "Possession, ready to move, booking amount, offers and unit facts.")
-            + ui.card("Travel times to landmarks", (ui.table(["Place", "Time", "Valid", "State"], lm_rows, "Landmarks") if lm_rows else "") + lm_form)
-            + "</div>")
-    return page(p["official_name"], body, u, "facts", [("Projects and Facts", "/admin/projects"), (p["official_name"], None)], request)
+    gcard = product_facts_card(u, p)
+    if prop:
+        body = (ui.page_header(p["official_name"], e(", ".join(x for x in (p["locality"], p["city"]) if x)),
+                               '<a class="btn secondary" href="/admin/projects">All projects</a>')
+                + '<div class="stack">'
+                + ui.card("Names BrandGuard listens for", "<p>" + e(" | ".join(names)) + "</p>" + alias_form)
+                + ui.card("RERA", rera_info + rera_form)
+                + ui.card("Project-wide facts", ui.table(heads, proj_facts, "Project facts") if proj_facts else ui.empty("None yet"))
+                + units_html
+                + ui.card("Add a property type", unit_form, "Apartment, penthouse, villa, bungalow, row house or plot.")
+                + ui.card("Add or change a fact", fact_form, "Possession, ready to move, booking amount, offers and unit facts.")
+                + gcard
+                + ui.card("Travel times to landmarks", (ui.table(["Place", "Time", "Valid", "State"], lm_rows, "Landmarks") if lm_rows else "") + lm_form)
+                + "</div>")
+    else:
+        variant_form = (f'<form method="post" action="/admin/projects/{pid}/unit" data-lock><input type="hidden" name="category" value="product">'
+                        f'<div class="field-grid"><div><label for="vl">Variant name</label><input id="vl" name="label" required '
+                        f'placeholder="e.g. VXi, 500 g pack, Gold plan"></div>'
+                        f'<div><label for="vp">Price (optional)</label><input id="vp" name="price" placeholder="e.g. 9,470 or 8.5 lakh"></div>'
+                        f'<div><label for="vs">Source document</label><input id="vs" name="source" placeholder="e.g. Price list Nov 2026"></div></div>'
+                        f'<button class="btn" type="submit">{ui.icon("plus", 16)}Add variant</button></form>')
+        body = (ui.page_header(p["official_name"], "Product, its variants and the approved facts content is checked against.",
+                               '<a class="btn secondary" href="/admin/projects">All products</a>')
+                + '<div class="stack">'
+                + ui.card("Names BrandGuard listens for", "<p>" + e(" | ".join(names)) + "</p>" + alias_form)
+                + gcard
+                + (ui.card("Other product-wide facts", ui.table(heads, proj_facts, "Product facts")) if proj_facts else "")
+                + units_html
+                + ui.card("Add a variant", variant_form, "A model, plan, size or pack. Give each one its own price if it has one.")
+                + "</div>")
+    crumb = "Projects and Facts" if prop else "Products and Facts"
+    return page(p["official_name"], body, u, "facts", [(crumb, "/admin/projects"), (p["official_name"], None)], request)
+
+
+def product_facts_card(u, p):
+    defs = GEN.list_defs(u["brand_id"])
+    if not defs:
+        return ui.card("Your own fact types", '<p class="muted">No fact types yet. Define what you sell on (discount, warranty, '
+                       'fees, mileage, interest rate, delivery date...) once, then give each product its approved values.</p>'
+                       '<a class="btn" href="/admin/fact-types">Define fact types</a>')
+    def_opts = "".join(f'<option value="{d["id"]}">{e(d["label"])} ({e(GEN.TYPES[d["ftype"]])}'
+                       f'{(", " + e(d["units"][0])) if d["units"] else ""})</option>' for d in defs)
+    unit_opts = '<option value="">Whole product</option>' + "".join(
+        f'<option value="{ut["id"]}">{e(ut["label"])}</option>' for ut in RE.unit_types(p["id"]))
+    rows = []
+    for d in defs:
+        for f in RE._q("SELECT * FROM facts WHERE project_id=? AND key=? ORDER BY id", (p["id"], d["key"])):
+            if not RE._is_current(f):
+                continue
+            ut = RE._q("SELECT label FROM unit_types WHERE id=?", (f["unit_type_id"],)) if f["unit_type_id"] else []
+            rows.append([e(d["label"]), e(RE.fact_display(f)), e(ut[0]["label"] if ut else "Whole product"),
+                         e(GEN.DIRECTIONS[d["direction"]]), f'{e(f["valid_from"] or "")} to {e(f["valid_to"] or "open")}',
+                         f'<form method="post" action="/admin/projects/{p["id"]}/fact/end" style="display:inline">'
+                         f'<input type="hidden" name="fact_id" value="{f["id"]}"><button class="btn secondary sm" type="submit">Withdraw</button></form>'])
+    form = (f'<form method="post" action="/admin/projects/{p["id"]}/gfact" data-lock><div class="field-grid">'
+            f'<div><label for="gd">Fact</label><select id="gd" name="def_id">{def_opts}</select></div>'
+            f'<div><label for="gu">Applies to</label><select id="gu" name="unit_type_id">{unit_opts}</select></div>'
+            f'<div><label for="gv">Approved value</label><input id="gv" name="value" required placeholder="30, 999, 22, 2027-03, yes"></div>'
+            f'<div><label for="gt">Valid until (optional)</label><input id="gt" name="valid_to" type="date"></div>'
+            f'<div><label for="gs">Source document</label><input id="gs" name="source" required placeholder="Where this value comes from"></div></div>'
+            f'<button class="btn" type="submit">Save value</button> <a class="btn secondary" href="/admin/fact-types">Manage fact types</a></form>')
+    return ui.card("Your own fact types", (ui.table(["Fact", "Approved", "Applies to", "Rule", "Valid", ""], rows, "Fact values")
+                                          if rows else '<p class="muted">No approved values yet.</p>') + form,
+                   "Claims about these are found in speech, captions, screen text and documents, and compared with these values.")
+
+
+@app.post("/admin/projects/{pid}/gfact")
+def project_gfact(request: Request, pid: int, def_id: int = Form(0), unit_type_id: str = Form(""), value: str = Form(""),
+                  valid_to: str = Form(""), source: str = Form("")):
+    u = admin_only(request)
+    p = own_project(u, pid) if u else None
+    if not p:
+        return RedirectResponse("/admin/projects", 303)
+    try:
+        save_generic_fact(u, p, def_id, unit_type_id, value, valid_to, source)
+    except ValueError as ex_:
+        return admin_back(request, pid, err=str(ex_))
+    return admin_back(request, pid, "Saved. Earlier approvals that relied on the old value have been flagged for re-check.")
+
+
+def save_generic_fact(u, p, def_id, unit_type_id, value, valid_to, source, reason="Set by builder"):
+    d = GEN.get_def_by_id(u["brand_id"], def_id)
+    if not d:
+        raise ValueError("Choose a fact type.")
+    if not (source or "").strip():
+        raise ValueError("Name the source document for this value.")
+    ut_id = int(unit_type_id) if str(unit_type_id).isdigit() else None
+    if ut_id and not RE._q("SELECT 1 FROM unit_types WHERE id=? AND project_id=?", (ut_id, p["id"])):
+        raise ValueError("That variant does not belong to this product.")
+    num, txt = GEN.parse_value(d["ftype"], value)
+    if valid_to and valid_to < RE.today():
+        raise ValueError("The end date is in the past.")
+    unit = {"percent": "%", "money": "INR"}.get(d["ftype"], d["units"][0] if d["units"] else "")
+    RE.set_fact(p["id"], d["key"], num, txt, ut_id, unit, source_id_for(u, source), None, valid_to or None, u["name"], reason)
+    log(None, u["name"], "FACT_SET", f'{p["official_name"]}: {d["label"]} = {txt if txt is not None else f"{num:g}"}', u["brand_id"])
+
+
+# ============================================================ import and sample data
+SAMPLE_GENERAL = {
+    "products": [{"name": "Zippy Hatchback", "aliases": ["Zippy", "ज़िप्पी", "झिप्पी"],
+                  "variants": [{"name": "LXi", "price": "6.2 lakh"}, {"name": "VXi", "price": "7.1 lakh"}]},
+                 {"name": "Easy Car Loan", "aliases": ["car loan", "कार लोन"], "variants": []}],
+    "fact_types": [{"label": "Discount", "ftype": "percent", "unit": "", "aliases": "off, सूट, सवलत, डिस्काउंट", "direction": "max"},
+                   {"label": "Mileage", "ftype": "number", "unit": "kmpl, km/l, km per litre", "aliases": "average, मायलेज", "direction": "max"},
+                   {"label": "Warranty", "ftype": "number", "unit": "years, year, yrs, वर्ष, साल", "aliases": "वॉरंटी", "direction": "max"},
+                   {"label": "Free insurance", "ftype": "yes_no", "unit": "", "aliases": "insurance free, मोफत विमा", "direction": "exact"},
+                   {"label": "Interest rate", "ftype": "percent", "unit": "", "aliases": "rate of interest, ब्याज दर, व्याजदर", "direction": "min"},
+                   {"label": "Processing fee", "ftype": "money", "unit": "", "aliases": "processing charges, प्रोसेसिंग फी", "direction": "exact"},
+                   {"label": "Loan tenure", "ftype": "number", "unit": "years, year, वर्ष, साल", "aliases": "tenure", "direction": "max"}],
+    "values": [{"product": "Zippy Hatchback", "variant": "", "fact": "Discount", "value": "5", "valid_to": ""},
+               {"product": "Zippy Hatchback", "variant": "", "fact": "Mileage", "value": "22", "valid_to": ""},
+               {"product": "Zippy Hatchback", "variant": "", "fact": "Warranty", "value": "3", "valid_to": ""},
+               {"product": "Zippy Hatchback", "variant": "", "fact": "Free insurance", "value": "no", "valid_to": ""},
+               {"product": "Easy Car Loan", "variant": "", "fact": "Interest rate", "value": "8.75", "valid_to": ""},
+               {"product": "Easy Car Loan", "variant": "", "fact": "Processing fee", "value": "999", "valid_to": ""},
+               {"product": "Easy Car Loan", "variant": "", "fact": "Loan tenure", "value": "7", "valid_to": ""}],
+}
+SAMPLE_PROPERTY = {
+    "products": [{"name": "Sample Residency", "aliases": ["Sample Residency Baner", "सॅम्पल रेसिडेन्सी"],
+                  "variants": [{"name": "1 BHK", "price": "65 lakh"}, {"name": "2 BHK", "price": "95 lakh"}]}],
+    "fact_types": [{"label": "Discount", "ftype": "percent", "unit": "", "aliases": "off, सूट, सवलत", "direction": "max"}],
+    "values": [{"product": "Sample Residency", "variant": "", "fact": "Discount", "value": "2", "valid_to": ""}],
+}
+
+
+def apply_import(u, rows, source_title):
+    """Save the ticked rows of a checked proposal. Returns a summary string."""
+    prop_domain = load_reg(u).get("domain", "property") == "property"
+    src = source_id_for(u, source_title)
+    made = {"fact types": 0, "products": 0, "variants": 0, "values": 0}
+    for r in rows:
+        if r["kind"] == "fact_type":
+            d = r["data"]
+            GEN.add_def(u["brand_id"], d["label"], d["ftype"], d.get("unit", ""), d.get("aliases", ""), d.get("direction", "exact"))
+            made["fact types"] += 1
+    projects = {p["official_name"].lower(): p for p in RE.brand_projects(u["brand_id"], active_only=False)}
+
+    def product(name, aliases=()):
+        p = projects.get(name.lower())
+        if not p:
+            pid = RE.add_project(u["brand_id"], name, "", "", "", "", list(aliases), u["name"])
+            p = RE.get_project(pid)
+            projects[name.lower()] = p
+            made["products"] += 1
+            log(None, u["name"], "PROJECT_ADDED", name, u["brand_id"])
+        else:
+            have = {a.lower() for a in RE.names_of(p)}
+            for a in aliases:
+                if a.lower() not in have:
+                    RE._ex("INSERT INTO project_aliases (project_id, alias) VALUES (?,?)", (p["id"], a))
+        return p
+    for r in rows:
+        if r["kind"] == "product":
+            product(r["data"]["name"], r["data"].get("aliases", []))
+    for r in rows:
+        if r["kind"] != "variant":
+            continue
+        v = r["data"]
+        p = product(v["product"])
+        ut = next((x for x in RE.unit_types(p["id"]) if x["label"].lower() == v["name"].lower()), None)
+        if not ut:
+            bhk = RE._bhk_in(v["name"]) if prop_domain else None
+            uid = RE.add_unit_type(p["id"], "apartment" if bhk else "product", v["name"], int(bhk) if bhk else None)
+            made["variants"] += 1
+        else:
+            uid = ut["id"]
+        if v.get("price"):
+            RE.set_fact(p["id"], "price", float(parse_price(v["price"])), None, uid, "INR", src, None, None, u["name"], "Imported")
+    for r in rows:
+        if r["kind"] != "value":
+            continue
+        v = r["data"]
+        p = product(v["product"])
+        d = GEN.get_def(u["brand_id"], v["fact"])
+        if not d:
+            continue
+        uid = None
+        if v.get("variant"):
+            ut = next((x for x in RE.unit_types(p["id"]) if x["label"].lower() == v["variant"].lower()), None)
+            uid = ut["id"] if ut else None
+        num, txt = GEN.parse_value(d["ftype"], v["value"])
+        unit = {"percent": "%", "money": "INR"}.get(d["ftype"], d["units"][0] if d["units"] else "")
+        RE.set_fact(p["id"], d["key"], num, txt, uid, unit, src, None, GEN.parse_date(v.get("valid_to", "")) or None,
+                    u["name"], "Imported")
+        made["values"] += 1
+    return ", ".join(f"{n} {k}" for k, n in made.items() if n) or "nothing new"
+
+
+@app.get("/admin/import", response_class=HTMLResponse)
+def import_page(request: Request):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    sheet = (f'<ol><li><a class="btn secondary sm" href="/admin/import/template">Download the template (.xlsx)</a></li>'
+             f'<li>Fill the Products, Fact types and Facts sheets. Instructions are inside.</li><li>Upload it here.</li></ol>'
+             f'<form method="post" action="/admin/import/sheet" enctype="multipart/form-data" data-lock>'
+             f'<input type="file" name="file" accept=".xlsx" required> <button class="btn" type="submit">Read spreadsheet</button></form>')
+    ai_on = bool(os.environ.get("GROQ_API_KEY"))
+    bro = (f'<p class="muted">PDF, Word, text or a photo of a price list. The AI proposes products and facts; every number '
+           f'is checked against the document, and you confirm row by row.</p>'
+           + ('' if ai_on else ui.alert("AI is not set up on this server, so brochure import is off. Use the spreadsheet.", "warn"))
+           + f'<form method="post" action="/admin/import/brochure" enctype="multipart/form-data" data-lock>'
+           f'<input type="file" name="file" accept=".pdf,.docx,.txt,.png,.jpg,.jpeg" required {"" if ai_on else "disabled"}> '
+           f'<button class="btn" type="submit" {"" if ai_on else "disabled"}>Read brochure</button></form>')
+    body = (ui.page_header("Import products and facts", "Nothing is saved until you check the rows and confirm.",
+                           '<a class="btn secondary" href="/admin/projects">Products and facts</a>')
+            + '<div class="stack"><div class="cols-2">' + ui.card("Spreadsheet (no AI)", sheet) + ui.card("Brochure or price list (AI)", bro)
+            + "</div></div>")
+    return page("Import", body, u, "facts", [("Products and Facts", "/admin/projects"), ("Import", None)], request)
+
+
+@app.get("/admin/import/template")
+def import_template(request: Request):
+    if not admin_only(request):
+        return RedirectResponse("/", 303)
+    return Response(IMP.template_xlsx(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": 'attachment; filename="brandguard-products-template.xlsx"'})
+
+
+def _read_small(up, limit_mb=10):
+    data = up.file.read(limit_mb * 1024 * 1024 + 1)
+    if len(data) > limit_mb * 1024 * 1024:
+        raise ValueError(f"The file is larger than {limit_mb} MB.")
+    return data
+
+
+@app.post("/admin/import/sheet")
+def import_sheet(request: Request, file: UploadFile = File(...)):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    try:
+        if not (file.filename or "").lower().endswith(".xlsx"):
+            raise ValueError("Upload the filled template as an .xlsx file.")
+        prop = IMP.parse_xlsx(_read_small(file))
+    except ValueError as ex_:
+        request.session["flash"] = str(ex_)
+        return RedirectResponse("/admin/import", 303)
+    rows = IMP.check(prop, None, parse_price, GEN.list_defs(u["brand_id"]))
+    iid = IMP.save(u["brand_id"], "spreadsheet", file.filename or "Spreadsheet", {"rows": rows}, u["name"])
+    return RedirectResponse(f"/admin/import/{iid}", 303)
+
+
+@app.post("/admin/import/brochure")
+def import_brochure(request: Request, file: UploadFile = File(...)):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    try:
+        text = IMP.extract_text(file.filename, _read_small(file))
+        if len(text.strip()) < 20:
+            raise ValueError("Almost no text was found in this file.")
+        prop = IMP.ai_propose(text)
+    except ValueError as ex_:
+        request.session["flash"] = str(ex_)
+        return RedirectResponse("/admin/import", 303)
+    except Exception as ex_:
+        request.session["flash"] = (str(ex_) if "AI is not set up" in str(ex_)
+                                    else "The AI could not read this document. Try again, or use the spreadsheet.")
+        return RedirectResponse("/admin/import", 303)
+    rows = IMP.check(prop, text, parse_price, GEN.list_defs(u["brand_id"]))
+    iid = IMP.save(u["brand_id"], "brochure", file.filename or "Brochure", {"rows": rows}, u["name"])
+    return RedirectResponse(f"/admin/import/{iid}", 303)
+
+
+@app.get("/admin/import/{iid}", response_class=HTMLResponse)
+def import_preview(request: Request, iid: int):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    meta, data = IMP.load(u["brand_id"], iid)
+    if not meta:
+        return RedirectResponse("/admin/import", 303)
+    rows = data["rows"]
+    kind_label = {"fact_type": "Fact type", "product": "Product", "variant": "Variant and price", "value": "Approved value"}
+    trs = []
+    for r in rows:
+        box = (f'<input type="checkbox" name="row" value="{r["id"]}" {"checked" if r["ok"] else ""} '
+               f'{"" if r["ok"] or "not found in the document" in r["problem"] else "disabled"} aria-label="Include">')
+        trs.append([box, e(kind_label[r["kind"]]), e(r["text"]),
+                    ui.badge("Ready", "ok", "check") if r["ok"] else f'{ui.badge("Check", "warn", "alert")} <span class="muted">{e(r["problem"])}</span>'])
+    done = meta["applied_at"]
+    by = "the AI read the document" if meta["kind"] == "brochure" else "read from your spreadsheet"
+    form = (f'<form method="post" action="/admin/import/{iid}/apply" data-lock>'
+            + ui.table(["", "What", "Row", "Check"], trs, "Proposed rows")
+            + f'<div class="field-grid" style="margin-top:12px"><div><label for="st">Source document name</label>'
+            f'<input id="st" name="source" required value="{e(meta["title"])}"></div></div>'
+            f'<p class="hint">Rows marked Check are unticked. Values the AI proposed that are not in the document are unticked: tick them '
+            f'only if you know they are right. Rows with errors cannot be imported; fix them in the file and upload again.</p>'
+            f'<button class="btn" type="submit" {"disabled" if done else ""}>Confirm and save ticked rows</button></form>')
+    body = (ui.page_header("Check before saving", f"{len(rows)} rows {by}. Untick anything that is wrong.",
+                           '<a class="btn secondary" href="/admin/import">Back</a>')
+            + '<div class="stack">' + (ui.alert(f"Already saved on {e(done)}.", "ok") if done else "")
+            + ui.card("Proposed products and facts", form) + "</div>")
+    return page("Check import", body, u, "facts", [("Products and Facts", "/admin/projects"), ("Import", "/admin/import"), ("Check", None)], request)
+
+
+@app.post("/admin/import/{iid}/apply")
+async def import_apply(request: Request, iid: int):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    meta, data = IMP.load(u["brand_id"], iid)
+    if not meta or meta["applied_at"]:
+        return RedirectResponse("/admin/import", 303)
+    form = await request.form()
+    pick = {int(x) for x in form.getlist("row") if str(x).isdigit()}
+    rows = [r for r in data["rows"] if r["id"] in pick and (r["ok"] or "not found in the document" in r["problem"])]
+    source = (form.get("source") or meta["title"]).strip()[:200]
+    if not rows:
+        request.session["flash"] = "Nothing was ticked, so nothing was saved."
+        return RedirectResponse(f"/admin/import/{iid}", 303)
+    try:
+        summary = apply_import(u, rows, source)
+    except ValueError as ex_:
+        request.session["flash"] = f"Import stopped: {ex_}"
+        return RedirectResponse(f"/admin/import/{iid}", 303)
+    IMP.mark_applied(iid)
+    log(None, u["name"], "IMPORT_APPLIED", f"{meta['kind']} {meta['title']}: {summary}", u["brand_id"])
+    request.session["flash"] = f"Saved: {summary}."
+    return RedirectResponse("/admin/projects", 303)
+
+
+@app.post("/admin/sample")
+def load_sample(request: Request):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    sample = SAMPLE_PROPERTY if load_reg(u).get("domain", "property") == "property" else SAMPLE_GENERAL
+    rows = IMP.check(json.loads(json.dumps(sample)), None, parse_price, GEN.list_defs(u["brand_id"]))
+    summary = apply_import(u, [r for r in rows if r["ok"]], "BrandGuard sample data (not real)")
+    log(None, u["name"], "SAMPLE_LOADED", summary, u["brand_id"])
+    request.session["flash"] = f"Sample data loaded: {summary}. It is marked as sample data; remove it before real use."
+    return RedirectResponse("/admin/projects", 303)
+
+
+@app.get("/admin/fact-types", response_class=HTMLResponse)
+def fact_types_page(request: Request):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    rows = [[f'<b>{e(d["label"])}</b>', e(GEN.TYPES[d["ftype"]]), e(", ".join(d["units"]) or "-"),
+             e(", ".join(d["aliases"]) or "-"), e(GEN.DIRECTIONS[d["direction"]]),
+             f'<form method="post" action="/admin/fact-types/remove" style="display:inline"><input type="hidden" name="def_id" value="{d["id"]}">'
+             f'<button class="btn secondary sm" type="submit">Remove</button></form>'] for d in GEN.list_defs(u["brand_id"])]
+    t_opts = "".join(f'<option value="{k}">{e(v)}</option>' for k, v in GEN.TYPES.items())
+    d_opts = "".join(f'<option value="{k}">{e(v)}</option>' for k, v in GEN.DIRECTIONS.items())
+    form = (f'<form method="post" action="/admin/fact-types" data-lock><div class="field-grid">'
+            f'<div><label for="dl">Name</label><input id="dl" name="label" required maxlength="60" placeholder="Discount, Mileage, Processing fee"></div>'
+            f'<div><label for="dt">Type of value</label><select id="dt" name="ftype">{t_opts}</select></div>'
+            f'<div><label for="du">Unit (numbers only)</label><input id="du" name="unit" placeholder="kmpl, km/l  or  years, yrs"></div>'
+            f'<div><label for="da">Other words people use</label><input id="da" name="aliases" placeholder="off, सूट, सवलत"></div>'
+            f'<div><label for="dd">Rule</label><select id="dd" name="direction">{d_opts}</select></div></div>'
+            f'<p class="hint">Separate several spellings with commas. "Must not be more than this" suits discounts, mileage and '
+            f'warranties. "Must not be less than this" suits interest rates and delivery dates.</p>'
+            f'<button class="btn" type="submit">{ui.icon("plus", 16)}Save fact type</button></form>')
+    body = (ui.page_header("Fact types", "What your content makes claims about. Define each once; give each product its values.",
+                           '<a class="btn secondary" href="/admin/projects">Products and facts</a>')
+            + '<div class="stack">' + ui.card("Your fact types", ui.table(["Name", "Type", "Unit", "Other words", "Rule", ""], rows, "Fact types")
+                                              if rows else ui.empty("No fact types yet", "Add one below, or import a spreadsheet or brochure."))
+            + ui.card("Add or change a fact type", form) + "</div>")
+    return page("Fact types", body, u, "facts", [("Products and Facts", "/admin/projects"), ("Fact types", None)], request)
+
+
+@app.post("/admin/fact-types")
+def fact_types_save(request: Request, label: str = Form(""), ftype: str = Form(""), unit: str = Form(""),
+                    aliases: str = Form(""), direction: str = Form("exact")):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    try:
+        GEN.add_def(u["brand_id"], label, ftype, unit, aliases, direction)
+        log(None, u["name"], "FACT_TYPE_SET", f"{label.strip()} ({ftype})", u["brand_id"])
+        request.session["flash"] = f"Saved {label.strip()}."
+    except ValueError as ex_:
+        request.session["flash"] = str(ex_)
+    return RedirectResponse("/admin/fact-types", 303)
+
+
+@app.post("/admin/fact-types/remove")
+def fact_types_remove(request: Request, def_id: int = Form(0)):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    d = GEN.get_def_by_id(u["brand_id"], def_id)
+    if d:
+        GEN.remove_def(u["brand_id"], def_id)
+        log(None, u["name"], "FACT_TYPE_REMOVED", d["label"], u["brand_id"])
+        request.session["flash"] = f"Removed {d['label']}. Its stored values are kept but no longer checked."
+    return RedirectResponse("/admin/fact-types", 303)
 
 
 def _save_fact(u, p, key, unit_type_id, value, source, reason, valid_from, valid_to):
@@ -2399,8 +2962,11 @@ async def project_unit(request: Request, pid: int):
                 bhk = int(float(f.get("bhk")))
             except ValueError:
                 raise ValueError("BHK must be a number.")
+        if cat == "product" and (f.get("price") or "").strip() and not (f.get("source") or "").strip():
+            raise ValueError("Name the source document for the price.")
         uid = RE.add_unit_type(pid, cat, label, bhk)
-        _save_fact(u, p, "price", uid, f.get("price", ""), f.get("source", ""), "Added with property type", "", "")
+        if cat != "product" or (f.get("price") or "").strip():
+            _save_fact(u, p, "price", uid, f.get("price", ""), f.get("source", ""), "Added with property type", "", "")
         for k in allowed:
             if k in ("bhk",) or not (f.get(k) or "").strip():
                 continue

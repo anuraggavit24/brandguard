@@ -5,3 +5,7 @@ requests
 itsdangerous
 yt-dlp
 pypdf
+openpyxl
+python-docx
+opencv-python-headless
+numpy
