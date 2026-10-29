@@ -18,7 +18,7 @@ from urllib.parse import quote, urlparse
 
 import requests
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
 
 import accounts as ACC
@@ -55,7 +55,7 @@ THRESHOLD = 0.65
 AV_EXT = {".mp4", ".mov", ".mkv", ".webm", ".m4a", ".mp3", ".wav", ".aac", ".ogg"}
 ALLOWED = AV_EXT | FMT.IMAGE_EXT | FMT.DOC_EXT
 LINK_HOSTS = ("youtube.com", "youtu.be", "instagram.com", "facebook.com", "fb.watch")
-DEMO = {"admin": 1, "partner": 2, "fvideoancer": 3}
+DEMO = {"admin": 1, "partner": 2, "freelancer": 3}
 ROLE_LABEL = {"admin": "Builder / Brand Manager", "submitter": "Creator / Partner"}
 
 # comparative and urgency claims that need supporting evidence
@@ -66,9 +66,18 @@ UNSUPPORTED = [
 ]
 
 app = FastAPI(title="BrandGuard")
-app.add_middleware(SessionMiddleware,
-                   secret_key=os.environ.get("SECRET_KEY", "dev-only-change-me"),
-                   max_age=3 * 86400)
+def _secret_key():
+    # never fall back to a guessable key: use SECRET_KEY, else a random key kept in the data folder
+    if os.environ.get("SECRET_KEY"):
+        return os.environ["SECRET_KEY"]
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    f = DATA_DIR / ".secret_key"
+    if not f.exists():
+        f.write_text(secrets.token_hex(32), encoding="utf-8")
+    return f.read_text(encoding="utf-8").strip()
+
+
+app.add_middleware(SessionMiddleware, secret_key=_secret_key(), max_age=3 * 86400, same_site="lax")
 
 e = html.escape
 
@@ -143,10 +152,12 @@ def init_db():
         con.execute("INSERT INTO brands VALUES (2, ?, ?)", ("Sample Builders", json.dumps(REG2, ensure_ascii=False)))
         con.execute("INSERT INTO users VALUES (1, 'Builder Admin', 'admin@demo.test', 'admin', 1)")
         con.execute("INSERT INTO users VALUES (2, 'Rahul Realty (Channel Partner)', 'partner@demo.test', 'submitter', NULL)")
-        con.execute("INSERT INTO users VALUES (3, 'Priya Fvideoance (Fvideoancer)', 'fvideoancer@demo.test', 'submitter', NULL)")
+        con.execute("INSERT INTO users VALUES (3, 'Priya Freelance (Freelancer)', 'freelancer@demo.test', 'submitter', NULL)")
         con.execute("INSERT INTO memberships VALUES (2, 1)")
         con.execute("INSERT INTO memberships VALUES (3, 1)")
         con.execute("INSERT INTO memberships VALUES (3, 2)")
+    con.execute("UPDATE users SET name='Priya Freelance (Freelancer)', email='freelancer@demo.test' "
+                "WHERE id=3 AND name LIKE '%Fvideoanc%'")
     con.commit()
     con.close()
 
@@ -225,7 +236,7 @@ def page(title, body, user=None, active="", crumbs=None, request=None):
         queue_n = q("SELECT COUNT(*) AS c FROM submissions WHERE brand_id=? AND status IN ('SUPERVISION','DISPUTED')",
                     (user["brand_id"],))[0]["c"]
     demo = [] if user["pw_hash"] else [(k, lbl, DEMO[k] == user["id"]) for k, lbl in
-                                       (("admin", "Builder"), ("partner", "Channel Partner"), ("fvideoancer", "Fvideoancer"))]
+                                       (("admin", "Builder"), ("partner", "Channel Partner"), ("freelancer", "Freelancer"))]
     return HTMLResponse(ui.shell(title, body, user, ROLE_LABEL[user["role"]], active, crumbs,
                                  queue_n, company, flash, demo))
 
@@ -284,7 +295,9 @@ def health():
 
 
 @app.get("/ocr-status")
-def ocr_status():
+def ocr_status(request: Request):
+    if not admin_only(request):
+        return JSONResponse({"error": "builder only"}, 403)
     import shutil
     return {"ocr_available": OCR.available(), "tesseract": OCR.TESSERACT,
             "ffmpeg": shutil.which("ffmpeg"), "ffprobe": shutil.which("ffprobe"),
@@ -292,7 +305,9 @@ def ocr_status():
 
 
 @app.get("/ocr-test")
-def ocr_test(name: str = "approval.mp4"):
+def ocr_test(request: Request, name: str = "approval.mp4"):
+    if not admin_only(request):
+        return JSONResponse({"error": "builder only"}, 403)
     import time, traceback
     p = Path("demo_audio") / Path(name).name
     if not p.exists():
@@ -337,8 +352,8 @@ def home(request: Request):
                 "Enter as Builder")}
           {role("partner", "upload", "Channel Partner",
                 "Submit a video or paste a link for one company and see the result.", "Enter as Partner")}
-          {role("fvideoancer", "building", "Fvideoancer",
-                "Works with two companies under one login and switches between them.", "Enter as Fvideoancer")}
+          {role("freelancer", "building", "Freelancer",
+                "Works with two companies under one login and switches between them.", "Enter as Freelancer")}
         </div>
         <p style="margin-top:20px"><a class="btn secondary" href="/test-audio">Judges: demo files to download</a></p>
         <p class="muted" style="margin-top:12px">The demo roles are shared sample accounts with fictional data. Real accounts are separate.</p>"""
@@ -348,7 +363,7 @@ def home(request: Request):
 
 @app.get("/enter/{key}")
 def enter(request: Request, key: str):
-    uid = DEMO.get(key)
+    uid = DEMO.get("freelancer" if key == "fvideoancer" else key)
     if uid:
         request.session["uid"] = uid
         request.session.pop("company", None)
@@ -3086,7 +3101,7 @@ def access_page(request: Request):
     boxes = "".join(f'<label class="check"><input type="checkbox" name="project_id" value="{p["id"]}"> {e(p["official_name"])}'
                     f'{" (" + e(p["city"]) + ")" if p["city"] else ""}</label>' for p in projs)
     uopts = "".join(f'<option value="{us["id"]}">{e(us["name"])}</option>' for us in users)
-    form = (f'<form method="post" action="/admin/access/grant" data-lock><label for="gu">Partner or fvideoancer</label>'
+    form = (f'<form method="post" action="/admin/access/grant" data-lock><label for="gu">Partner or freelancer</label>'
             f'<select id="gu" name="user_id">{uopts}</select><p></p><b>Projects</b><div>{boxes}</div><p></p>'
             f'<label for="gx">Access ends on (optional)</label><input id="gx" type="date" name="expires">'
             f'<p class="hint">Tick as many projects as needed. A city or company link does not grant every project, only the ticked ones.</p>'
@@ -4243,7 +4258,7 @@ TEST_CLIPS = [
             "Possession in December 2028.",
      "result": "Auto-Approved. The price, carpet area, bathrooms and possession all match the approved facts, so an "
                "approval ID is issued with no human needed.",
-     "steps": ["Download the file below.", "Click Enter as Fvideoancer on the home page.",
+     "steps": ["Download the file below.", "Click Enter as Freelancer on the home page.",
                "Open Submit a Video, choose Demo Developer, and upload the file.",
                "The result page opens. Look at the Claim-by-claim checks table: each spoken claim is matched to an approved fact."]},
     {"key": "rejection", "n": 2, "title": "Rejection test",
@@ -4252,21 +4267,21 @@ TEST_CLIPS = [
      "result": "Rejected. The price is correct, but \"guaranteed returns\" and \"price will double\" are banned phrases "
                "(\"last chance\" is also flagged if the sample brand guide has been imported). Each finding shows the "
                "exact second it appeared, whether it was spoken or shown on screen, why it matters and what to change.",
-     "steps": ["Download the file below.", "Enter as Fvideoancer and open Submit a Video.",
+     "steps": ["Download the file below.", "Enter as Freelancer and open Submit a Video.",
                "Choose Demo Developer and upload the file.",
                "Read the findings on the result page. The creator is told exactly what to fix."]},
     {"key": "dispute", "n": 3, "title": "Dispute test",
      "say": "Demo Heights, Wakad. 3 BHK flats available at 1 crore 50 lakh. Possession in December 2028.",
      "result": "Rejected, because 3 BHK is approved at 1 crore 90 lakh, not 1 crore 50 lakh. You then dispute it and "
                "play the builder to resolve it. This shows that a person always has the final word.",
-     "steps": ["Download the file below, then Enter as Fvideoancer, open Submit a Video, choose Demo Developer and upload it.",
+     "steps": ["Download the file below, then Enter as Freelancer, open Submit a Video, choose Demo Developer and upload it.",
                "The submission is Rejected for a price mismatch. Click Raise a dispute.",
                "Write why the finding is wrong (for example: \"I quoted the offer price for a limited floor\"). "
                "Optionally type what you actually said. Click Submit dispute. The status becomes Disputed.",
                "In the sidebar, switch the demo role to Builder. Open Review Queue, then open the disputed submission.",
                "The builder sees the evidence and the creator's explanation. Click Overturn decision to approve it "
                "(an approval ID is issued), or Uphold rejection to keep it rejected (a reason is required).",
-               "Switch back to Fvideoancer to see the outcome on the submission, and open Audit Trail as Builder to see "
+               "Switch back to Freelancer to see the outcome on the submission, and open Audit Trail as Builder to see "
                "every step recorded with who did it and when."]},
     {"key": "ocr", "file": "test", "n": 4, "title": "On-screen text (OCR) test video",
      "say": "",
@@ -4274,7 +4289,7 @@ TEST_CLIPS = [
                "Done, and the card \"Text read from the screen\" lists what appeared in the video, such as the price "
                "(₹1,30,00,000), carpet area, bathrooms and possession date, each with its time. The on-screen price is "
                "compared with the approved price and with the price spoken in the video.",
-     "steps": ["Download the video below.", "Click Enter as Fvideoancer, open Submit a Video, choose Demo Developer and upload it.",
+     "steps": ["Download the video below.", "Click Enter as Freelancer, open Submit a Video, choose Demo Developer and upload it.",
                "Wait for the review. On the free server this takes a while (see the note at the top of this page).",
                "On the result page, open the \"Text read from the screen\" card and the \"On-screen text\" and "
                "\"Voice versus screen\" checks."]},
@@ -4323,7 +4338,7 @@ def test_audio_page(request: Request):
                         '<p class="muted">As Builder, open Brand Rules and click Import from PDF, then upload this file. '
                         'BrandGuard lists the rules it found, you confirm them, and they apply to new submissions straight away.</p>'
                         '<a class="btn secondary" href="/test-audio/file/guide" download>Download sample brand guide (PDF)</a>')
-    start = ('<a class="btn" href="/enter/fvideoancer">Enter as Fvideoancer</a> '
+    start = ('<a class="btn" href="/enter/freelancer">Enter as Freelancer</a> '
              '<a class="btn secondary" href="/enter/admin">Enter as Builder</a>') if not u else ""
     body = (ui.page_header("Demo Files for Judges",
                            "Ready-made demo recordings and a demo video to test the main workflow: one approved, one rejected, "

@@ -14,7 +14,9 @@ from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw, ImageFont
 
 D = os.environ["DATA_DIR"]
-FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FONT = next((f for f in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                          r"C:\Windows\Fonts\arialbd.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf")
+             if os.path.exists(f)), "DejaVuSans-Bold.ttf")
 fails = []
 
 

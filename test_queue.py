@@ -91,7 +91,7 @@ with TestClient(main.app) as c:
     check("pending count is per user", JOBS.pending_count(3) == 0)
 
 with TestClient(main.app) as other:
-    other.get("/enter/fvideoancer")
+    other.get("/enter/freelancer")
     check("a different submitter cannot open the batch", other.get(f"/bulk/{bid}", follow_redirects=False).status_code == 303)
     check("a logged-out visitor cannot open the batch", TestClient(main.app).get(f"/bulk/{bid}", follow_redirects=False).status_code == 303)
 with TestClient(main.app) as adm:
