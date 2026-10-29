@@ -43,11 +43,15 @@ def setup(db_path):
     con = sqlite3.connect(DB_PATH)
     for sql in ("ALTER TABLE users ADD COLUMN pw_hash TEXT", "ALTER TABLE users ADD COLUMN created_at TEXT",
                 "ALTER TABLE memberships ADD COLUMN kind TEXT", "ALTER TABLE memberships ADD COLUMN joined_at TEXT",
-                "ALTER TABLE memberships ADD COLUMN all_projects INTEGER DEFAULT 0"):
+                "ALTER TABLE memberships ADD COLUMN all_projects INTEGER DEFAULT 0",
+                "ALTER TABLE users ADD COLUMN pw_version INTEGER DEFAULT 0", "ALTER TABLE users ADD COLUMN notify INTEGER DEFAULT 1"):
         try:
             con.execute(sql)
         except sqlite3.OperationalError:
             pass
+    con.execute("""CREATE TABLE IF NOT EXISTS password_resets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, token_hash TEXT UNIQUE NOT NULL, user_id INTEGER NOT NULL,
+        created_at TEXT, expires_at TEXT, used_at TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS invites (
         id INTEGER PRIMARY KEY AUTOINCREMENT, token_hash TEXT UNIQUE NOT NULL, brand_id INTEGER NOT NULL,
         email TEXT NOT NULL, kind TEXT NOT NULL, project_ids TEXT, invited_by TEXT, created_at TEXT,
@@ -272,6 +276,105 @@ def accept_invite(tok, name, password):
     if not n:
         raise ValueError("This invite link was just used.")
     return uid, inv["brand_id"], kind
+
+
+# ------------------------------------------------------------ one-time codes (OTP)
+OTP_MINUTES, OTP_TRIES, OTP_RESEND_SECONDS = 10, 5, 60
+
+
+def _otp_table():
+    _run("""CREATE TABLE IF NOT EXISTS otps (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, purpose TEXT,
+            code_hash TEXT, created_at TEXT, expires_at TEXT, attempts INTEGER DEFAULT 0, used_at TEXT)""")
+
+
+def new_otp(user_id, purpose):
+    """Returns (code, None), or (None, seconds to wait) if a code was sent less than a minute ago."""
+    _otp_table()
+    last = _rows("SELECT created_at FROM otps WHERE user_id=? AND purpose=? ORDER BY id DESC LIMIT 1", (user_id, purpose))
+    if last:
+        age = (datetime.now() - datetime.strptime(last[0]["created_at"], "%Y-%m-%d %H:%M:%S")).total_seconds()
+        if age < OTP_RESEND_SECONDS:
+            return None, int(OTP_RESEND_SECONDS - age) + 1
+    _run("UPDATE otps SET used_at=? WHERE user_id=? AND purpose=? AND used_at IS NULL", (_now(), user_id, purpose))
+    code = f"{secrets.randbelow(1000000):06d}"
+    _run("INSERT INTO otps (user_id, purpose, code_hash, created_at, expires_at) VALUES (?,?,?,?,?)",
+         (user_id, purpose, _hash_token(f"{user_id}:{purpose}:{code}"), _now(),
+          (datetime.now() + timedelta(minutes=OTP_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")))
+    return code, None
+
+
+def check_otp(user_id, purpose, code):
+    """True if the code is right. Each code allows a few tries, expires, and works once."""
+    _otp_table()
+    r = _rows("SELECT * FROM otps WHERE user_id=? AND purpose=? AND used_at IS NULL ORDER BY id DESC LIMIT 1", (user_id, purpose))
+    if not r or r[0]["expires_at"] < _now() or r[0]["attempts"] >= OTP_TRIES:
+        return False
+    row = r[0]
+    code = re.sub(r"\D", "", code or "")
+    if hmac.compare_digest(row["code_hash"], _hash_token(f"{user_id}:{purpose}:{code}")):
+        _run("UPDATE otps SET used_at=? WHERE id=?", (_now(), row["id"]))
+        return True
+    _run("UPDATE otps SET attempts=attempts+1 WHERE id=?", (row["id"],))
+    return False
+
+
+# ------------------------------------------------------------ password reset
+RESET_MINUTES = 60
+
+
+def request_reset(email, cooldown_minutes):
+    """Returns (user_row, raw_token) when a reset email should be sent, or (None, reason) when not.
+    reason is 'unknown' (no such account, or a demo account without a password) or 'cooldown'.
+    The caller shows the same message either way, so nobody can find out which emails have accounts."""
+    email = clean_email(email)
+    rows = _rows("SELECT * FROM users WHERE lower(email)=?", (email,)) if email else []
+    if not rows or not rows[0]["pw_hash"]:
+        return None, "unknown"
+    user = rows[0]
+    since = (datetime.now() - timedelta(minutes=max(1, int(cooldown_minutes)))).strftime("%Y-%m-%d %H:%M:%S")
+    if _rows("SELECT 1 FROM password_resets WHERE user_id=? AND created_at>=?", (user["id"], since)):
+        return None, "cooldown"
+    _run("UPDATE password_resets SET used_at=? WHERE user_id=? AND used_at IS NULL", (_now(), user["id"]))  # one live link
+    tok = secrets.token_urlsafe(32)
+    _run("INSERT INTO password_resets (token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)",
+         (_hash_token(tok), user["id"], _now(), (datetime.now() + timedelta(minutes=RESET_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")))
+    return user, tok
+
+
+def get_reset(tok):
+    if not tok or len(tok) > 100:
+        return None
+    r = _rows("""SELECT r.*, u.email, u.name FROM password_resets r JOIN users u ON u.id=r.user_id WHERE token_hash=?""",
+              (_hash_token(tok),))
+    if not r or r[0]["used_at"] or r[0]["expires_at"] < _now():
+        return None
+    return r[0]
+
+
+def complete_reset(tok, password):
+    """Set the new password. Signs the user out everywhere else. Returns the user id or raises ValueError."""
+    r = get_reset(tok)
+    if not r:
+        raise ValueError("This reset link is not valid any more. Ask for a new one.")
+    bad = check_password_rules(password)
+    if bad:
+        raise ValueError(bad)
+    _id, n = _run("UPDATE password_resets SET used_at=? WHERE id=? AND used_at IS NULL", (_now(), r["id"]))
+    if not n:
+        raise ValueError("This reset link was just used.")
+    _run("UPDATE users SET pw_hash=?, pw_version=COALESCE(pw_version,0)+1 WHERE id=?", (hash_password(password), r["user_id"]))
+    _clear_fails(r["email"], "")
+    return r["user_id"]
+
+
+def change_password(user_id, current, new):
+    rows = _rows("SELECT * FROM users WHERE id=?", (user_id,))
+    if not rows or not rows[0]["pw_hash"] or not verify_password(current, rows[0]["pw_hash"]):
+        raise ValueError("The current password is wrong.")
+    bad = check_password_rules(new)
+    if bad:
+        raise ValueError(bad)
+    _run("UPDATE users SET pw_hash=?, pw_version=COALESCE(pw_version,0)+1 WHERE id=?", (hash_password(new), user_id))
 
 
 def revoke_invite(brand_id, invite_id):

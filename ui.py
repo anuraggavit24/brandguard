@@ -632,6 +632,7 @@ def shell(title, body, user, role_label, active="", crumbs=None, queue_count=0,
             f'<aside class="side" id="side"><a class="brand" href="/"><span class="logo">{_LOGO}</span>BrandGuard</a>'
             f'<nav aria-label="Main">{"".join(links)}</nav>'
             f'<div class="side-foot">{"<div class=lbl>Switch demo role</div>" + demo if demo else ""}'
+            f'<a href="/account">{icon("users", 16)}My account</a>'
             f'<button type="button" class="tour-start" data-tour-start>{icon("help", 16)}Take the tour</button>'
             f'<a href="/logout">{icon("log-out", 16)}Log out</a></div></aside>'
             '<div class="scrim" id="scrim"></div>'

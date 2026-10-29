@@ -14,7 +14,7 @@ import subprocess
 import time
 import uuid
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -32,6 +32,8 @@ import importer as IMP
 import formats as FMT
 import assets as AST
 import mailer
+import ratelimit as RL
+import threading
 import packs
 import rewrite as RW
 import ocr as OCR
@@ -180,6 +182,9 @@ AIR.setup(DB_PATH)
 GEN.setup(DB_PATH)
 IMP.setup(DB_PATH)
 ACC.setup(DB_PATH)
+# demo memberships were created before roles were stored: Rahul is a channel partner, Priya a freelancer
+ex("UPDATE memberships SET kind='partner' WHERE user_id=2 AND kind IS NULL")
+ex("UPDATE memberships SET kind='freelancer' WHERE user_id=3 AND kind IS NULL")
 JOBS.setup(DB_PATH)
 
 
@@ -193,7 +198,12 @@ def me(request):
     if not uid:
         return None
     rows = q("SELECT * FROM users WHERE id=?", (uid,))
-    return rows[0] if rows else None
+    if not rows:
+        return None
+    if rows[0]["pw_hash"] and int(request.session.get("pv", 0)) != int(rows[0]["pw_version"] or 0):
+        request.session.clear()            # the password was changed or reset: older sessions end
+        return None
+    return rows[0]
 
 
 def get_sub(sid):
@@ -1117,11 +1127,14 @@ def store_projects(sid, rep, actor):
             actor if rep.get("identity", {}).get("state") == "CONFIRMED" else None))
 
 
-def review_submission(u, brand_id, path, sha, filename, language, source_url=None, caption="", hint_pid=None):
+def review_submission(u, brand_id, path, sha, filename, language, source_url=None, caption="", hint_pid=None, notify=True):
     """Review one file, then delete the uploaded copy. Only the report, transcript and file hash are kept, so the
     file can still be verified later by its hash, and uploads do not fill the disk."""
     try:
-        return _review_submission(u, brand_id, path, sha, filename, language, source_url, caption, hint_pid)
+        sid, msg = _review_submission(u, brand_id, path, sha, filename, language, source_url, caption, hint_pid)
+        if sid and notify:
+            notify_result(sid)
+        return sid, msg
     finally:
         remove_upload(path)
 
@@ -1269,6 +1282,7 @@ async def confirm_project(request: Request, sid: int):
     record_lessons(sid, rep, s["brand_id"])
     names = ", ".join(RE.get_project(i)["official_name"] for i in ids)
     log(sid, u["name"], "PROJECT_CONFIRMED", f"Confirmed project: {names}", s["brand_id"])
+    notify_result(sid)
     log(sid, "BrandGuard engine", "AUTO_REVIEW", f"{rep['verdict']} ({rep['flags']} flags, {rep['supervision']} to check)", s["brand_id"])
     if approval:
         log(sid, "BrandGuard engine", "AUTO_APPROVED", f"{approval} (policy {RE.POLICY_VERSION})", s["brand_id"])
@@ -1283,6 +1297,8 @@ def upload(request: Request, brand_id: int = Form(...), language: str = Form("au
         return RedirectResponse("/", 303)
     if not allowed_brand(u, brand_id):
         return err_page(u, "You are not linked to that company.")
+    if too_many_uploads(u):
+        return err_page(u, too_many_uploads(u))
     try:
         path, sha = save_upload(file)
     except Exception as ex_:
@@ -1300,6 +1316,8 @@ def upload_link(request: Request, brand_id: int = Form(...), language: str = For
     if not allowed_brand(u, brand_id):
         return err_page(u, "You are not linked to that company.")
     url = url.strip()
+    if too_many_uploads(u):
+        return err_page(u, too_many_uploads(u))
     if not host_ok(url):
         return err_page(u, "Please paste a link from YouTube, Instagram or Facebook.")
     try:
@@ -1319,6 +1337,8 @@ def upload_page(request: Request, brand_id: int = Form(...), url: str = Form(...
         return RedirectResponse("/", 303)
     if not allowed_brand(u, brand_id):
         return err_page(u, "You are not linked to that company.")
+    if too_many_uploads(u):
+        return err_page(u, too_many_uploads(u))
     try:
         title, desc, text = FMT.fetch_page(url)
     except ValueError as ex_:
@@ -1401,7 +1421,8 @@ ACTION_LABEL = {
     "LESSON_LEARNED": "Lesson written from dispute", "LESSON_APPLIED": "Earlier decision applied",
     "LESSON_CHANGED": "Lesson changed", "COMPANY_CREATED": "Company created", "INVITE_CREATED": "Invite created",
     "INVITE_ACCEPTED": "Invite accepted", "INVITE_CANCELLED": "Invite cancelled", "MEMBER_REMOVED": "Member removed",
-    "REWRITE_SUGGESTED": "Wording suggestion created", "PACK_APPLIED": "Industry rules added", "FACT_TYPE_SET": "Fact type saved", "FACT_TYPE_REMOVED": "Fact type removed",
+    "REWRITE_SUGGESTED": "Wording suggestion created", "PACK_APPLIED": "Industry rules added", "FACT_TYPE_SET": "Fact type saved", "PASSWORD_RESET_REQUESTED": "Password reset requested",
+    "PASSWORD_RESET": "Password reset", "PASSWORD_CHANGED": "Password changed", "FACT_TYPE_REMOVED": "Fact type removed",
     "IMPORT_APPLIED": "Products and facts imported", "SAMPLE_LOADED": "Sample data loaded", "AI_DISMISSED": "AI concern dismissed", "AI_BANNED": "AI concern added to banned phrases", "BATCH_STARTED": "Bulk batch queued", "BATCH_DONE": "Bulk batch finished",
 }
 DECISION_TEXT = {
@@ -1786,6 +1807,7 @@ def dispute(request: Request, sid: int, note: str = Form(""), said: str = Form("
         if said.strip():
             detail += f" (creator says they said: {said.strip()[:80]})"
         log(sid, u["name"], "DISPUTE_RAISED", detail)
+        notify_builders(sid, "dispute")
         request.session["flash"] = "Dispute sent to the builder."
     return RedirectResponse(f"/s/{sid}", 303)
 
@@ -1805,6 +1827,7 @@ def decide(request: Request, sid: int, decision: str = Form(...), note: str = Fo
         ex("UPDATE submissions SET status=?, approval_id=?, decision_note=? WHERE id=?",
            (status, approval, note.strip()[:1000], sid))
         log(sid, u["name"], action, (approval or "") + (" " + note.strip()[:300] if note.strip() else ""))
+        notify_result(sid, decided_by=u["name"], note=note.strip()[:500])
         if was_dispute and decision == "approve":
             try:
                 made = LRN.create_from_dispute(get_sub(sid), rep_of(s), s["dispute_note"] or "", note.strip()[:300], u["name"])
@@ -3418,6 +3441,8 @@ def public_base(request):
 def start_session(request, user_id):
     request.session.clear()          # a fresh session on every sign-in
     request.session["uid"] = user_id
+    row = q("SELECT pw_version FROM users WHERE id=?", (user_id,))
+    request.session["pv"] = int(row[0]["pw_version"] or 0) if row else 0
 
 
 def auth_form(title, intro, fields, action, button, error="", extra="", industry=None):
@@ -3451,6 +3476,11 @@ def signup_form(request: Request):
 def signup(request: Request, company: str = Form(""), name: str = Form(""), email: str = Form(""),
            password: str = Form(""), industry: str = Form("")):
     industry = industry if industry in packs.PACKS else ""
+    ok_, wait_ = RL.hit("signup:" + client_ip(request), 5, 3600)
+    if not ok_:
+        return page("Create company", auth_form("Set up your company", "Too many new companies from this network.",
+                                                [], "/signup", "Create company",
+                                                f"Please try again in {RL.wait_text(wait_)}."))
     try:
         uid, bid = ACC.create_company(company, name, email, password, industry)
     except ValueError as ex_:
@@ -3474,7 +3504,8 @@ def login_form(request: Request):
         "Sign in", "Use the email and password you registered with.",
         [("email", "Email", "email", "", True, "email"), ("password", "Password", "password", "", True, "current-password")],
         "/login", "Sign in",
-        extra='<p class="muted" style="margin-top:14px">New here? <a href="/signup">Create a company account</a>. '
+        extra='<p class="muted" style="margin-top:14px"><a href="/forgot">Forgot your password?</a></p>'
+              '<p class="muted" style="margin-top:6px">New here? <a href="/signup">Create a company account</a>. '
               'Invited by a company? Open the link in your invite email.</p>'))
 
 
@@ -3578,7 +3609,8 @@ def team_page(request: Request):
     kinds = "".join(f'<option value="{k}">{e(v[0])}</option>' for k, v in ACC.KINDS.items())
     mail_note = ("The invite is also emailed." if mailer.configured()
                  else "Email sending is not set up on this server, so copy the link and send it yourself.")
-    form = (f'<form method="post" action="/admin/team/invite" data-lock><label for="ie">Email address</label>'
+    gate = otp_gate_html(u, request)
+    form = gate or (f'<form method="post" action="/admin/team/invite" data-lock><label for="ie">Email address</label>'
             f'<input id="ie" name="email" type="email" required><p></p><label for="ik">Role</label>'
             f'<select id="ik" name="kind">{kinds}</select><p></p><b>What they may promote</b><div>{boxes}</div>'
             f'<p class="hint">Partners, freelancers and agencies only see and submit for the {word} chosen here. Managers get full '
@@ -3589,7 +3621,7 @@ def team_page(request: Request):
             + ui.card("People", ui.table(["Name", "Email", "Role", "Joined", ""], mrows, "People"))
             + ui.card("Pending invites", ui.table(["Email", "Role", "Expires", ""], irows, "Pending invites")
                       if irows else ui.empty("No pending invites"))
-            + ui.card("Invite someone", form) + bulk_invite_card(word) + email_card(u) + "</div>")
+            + ui.card("Invite someone", form) + bulk_invite_card(word) + email_card(u) + security_card(u) + "</div>")
     return page("Team and Invites", body, u, "team", [("Team and Invites", None)], request)
 
 
@@ -3749,9 +3781,17 @@ def team_bulk_preview(request: Request, iid: int):
     n_ok = sum(1 for p in people if p["ok"])
     sends = "Each person gets an email with their own link." if mailer.configured() else \
         "Email is not set up, so you will get a list of links to send yourself."
-    form = ('' if meta["applied_at"] else
-            f'<form method="post" action="/admin/team/bulk/{iid}/send" data-lock><button class="btn" type="submit" '
-            f'{"disabled" if not n_ok else ""}>Create {n_ok} invite(s)</button></form>')
+    need = otp_needed(u)
+    code_box = ("" if not need else
+                f'<div style="margin:14px 0"><form method="post" action="/admin/otp/send" style="display:inline">'
+                f'<input type="hidden" name="purpose" value="bulk:{iid}"><input type="hidden" name="back" value="/admin/team/bulk/{iid}">'
+                f'<button class="btn secondary" type="submit">Email me a code</button></form>'
+                f'<p class="hint" style="margin-top:8px">For safety, every bulk invite needs a fresh code sent to {e(u["email"])}.</p></div>')
+    form = ('' if meta["applied_at"] else code_box +
+            f'<form method="post" action="/admin/team/bulk/{iid}/send" data-lock>'
+            + (f'<label for="oc">Code from the email</label><input id="oc" name="code" inputmode="numeric" autocomplete="one-time-code" '
+               f'maxlength="6" required style="max-width:200px">' if need else "")
+            + f'<button class="btn" type="submit" {"disabled" if not n_ok else ""}>Create {n_ok} invite(s)</button></form>')
     body = (ui.page_header("Check the invite list", f"{n_ok} of {len(people)} rows are ready. Rows with a problem are skipped. {sends}",
                            '<a class="btn secondary" href="/admin/team">Back</a>')
             + '<div class="stack">' + (ui.alert(f"Already sent on {e(meta['applied_at'])}.", "ok") if meta["applied_at"] else "")
@@ -3760,11 +3800,20 @@ def team_bulk_preview(request: Request, iid: int):
 
 
 @app.post("/admin/team/bulk/{iid}/send", response_class=HTMLResponse)
-def team_bulk_send(request: Request, iid: int):
+def team_bulk_send(request: Request, iid: int, code: str = Form("")):
     u = admin_only(request)
     meta, data = IMP.load(u["brand_id"], iid) if u else (None, None)
     if not meta or meta["kind"] != "invites" or meta["applied_at"]:
         return RedirectResponse("/admin/team", 303)
+    if otp_needed(u) and not ACC.check_otp(u["id"], f"bulk:{iid}", code):
+        request.session["flash"] = "That code is wrong or has expired. Ask for a new one."
+        return RedirectResponse(f"/admin/team/bulk/{iid}", 303)
+    left = invites_left_today(u)
+    ready = [p for p in data["people"] if p["ok"]]
+    if len(ready) > left:
+        request.session["flash"] = (f"This list has {len(ready)} people but only {max(0, left)} more invites are allowed today "
+                                    f"(limit {INVITES_PER_DAY} a day). Split the list or try tomorrow.")
+        return RedirectResponse(f"/admin/team/bulk/{iid}", 303)
     IMP.mark_applied(iid)
     company = q("SELECT name FROM brands WHERE id=?", (u["brand_id"],))[0]["name"]
     results = []
@@ -3799,12 +3848,332 @@ def team_bulk_send(request: Request, iid: int):
     return page("Invites created", body, u, "team", [("Team and Invites", "/admin/team"), ("Invites created", None)], request)
 
 
+# ============================================================ safety: OTP, limits, notifications, account
+INVITES_PER_DAY = int(os.environ.get("INVITES_PER_DAY", "100"))
+UPLOADS_PER_HOUR = int(os.environ.get("UPLOADS_PER_HOUR", "30"))
+OTP_SESSION_MINUTES = 30
+
+
+def real_email(addr):
+    a = (addr or "").lower()
+    return bool(a) and not a.endswith(".test") and not a.endswith(".example") and "@" in a
+
+
+def otp_needed(u):
+    """Real accounts confirm with an emailed code before adding people. Demo accounts (fake emails) cannot receive
+    a code, and without email set up nobody can, so they are not blocked."""
+    return bool(u["pw_hash"]) and real_email(u["email"]) and mailer.configured()
+
+
+def otp_fresh(request):
+    try:
+        return float(request.session.get("otp_until", 0)) > time.time()
+    except (TypeError, ValueError):
+        return False
+
+
+def otp_gate_html(u, request):
+    if not otp_needed(u) or otp_fresh(request):
+        return ""
+    return (f'<div id="verify"><p>For safety, confirm it is you before adding people. We email a 6-digit code to '
+            f'<b>{e(u["email"])}</b>. It works for {OTP_SESSION_MINUTES} minutes in this sign-in.</p>'
+            f'<form method="post" action="/admin/otp/send" style="margin-bottom:12px"><input type="hidden" name="purpose" value="invite">'
+            f'<input type="hidden" name="back" value="/admin/team#verify"><button class="btn secondary" type="submit">Email me a code</button></form>'
+            f'<form method="post" action="/admin/otp/verify" data-lock><label for="otp">Code</label>'
+            f'<input id="otp" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required style="max-width:200px">'
+            f'<button class="btn" type="submit">Confirm</button></form></div>')
+
+
+@app.post("/admin/otp/send")
+def otp_send(request: Request, purpose: str = Form("invite"), back: str = Form("/admin/team")):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    back = back if back.startswith("/admin/team") else "/admin/team"
+    if not (purpose == "invite" or re.fullmatch(r"bulk:\d+", purpose)) or not otp_needed(u):
+        return RedirectResponse(back, 303)
+    code, wait_ = ACC.new_otp(u["id"], purpose)
+    if not code:
+        request.session["flash"] = f"A code was just sent. You can ask for another in {wait_} seconds."
+        return RedirectResponse(back, 303)
+    what = "send a list of invites" if purpose.startswith("bulk") else "add people to your company"
+    ok = mailer.send(u["email"], f"Your BrandGuard code: {code}",
+                     f"Your code to {what} is {code}.\nIt expires in {ACC.OTP_MINUTES} minutes.\n\n"
+                     f"If you did not ask for it, change your password: someone may be using your account.")
+    request.session["flash"] = (f"Code sent to {u['email']}. It expires in {ACC.OTP_MINUTES} minutes." if ok
+                                else f"The code could not be emailed ({mailer.last_error}).")
+    return RedirectResponse(back, 303)
+
+
+@app.post("/admin/otp/verify")
+def otp_verify(request: Request, code: str = Form("")):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    if ACC.check_otp(u["id"], "invite", code):
+        request.session["otp_until"] = time.time() + OTP_SESSION_MINUTES * 60
+        request.session["flash"] = f"Confirmed. You can add people for the next {OTP_SESSION_MINUTES} minutes."
+    else:
+        request.session["flash"] = "That code is wrong or has expired. Ask for a new one."
+    return RedirectResponse("/admin/team", 303)
+
+
+def invites_left_today(u):
+    n = q("SELECT COUNT(*) AS c FROM invites WHERE brand_id=? AND created_at>=?",
+          (u["brand_id"], datetime.now().strftime("%Y-%m-%d 00:00:00")))[0]["c"]
+    return INVITES_PER_DAY - n
+
+
+def too_many_uploads(u, adding=1):
+    """Uploads per person per hour, counted from the database so a restart does not reset it. '' when allowed."""
+    since = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+    n = q("SELECT COUNT(*) AS c FROM submissions WHERE user_id=? AND created_at>=?", (u["id"], since))[0]["c"]
+    try:
+        n += q("SELECT COUNT(*) AS c FROM jobs WHERE user_id=? AND status IN ('QUEUED','PROCESSING')", (u["id"],))[0]["c"]
+    except Exception:
+        pass
+    if n + adding > UPLOADS_PER_HOUR:
+        return (f"You can submit up to {UPLOADS_PER_HOUR} files an hour, and this would go over it. "
+                f"Please wait a while and try again.")
+    return ""
+
+
+def reset_cooldown_for(user):
+    """Minutes between reset emails for this person: their company's setting (the strictest one if they work
+    with several companies), else RESET_COOLDOWN_MIN, else 10."""
+    default = int(os.environ.get("RESET_COOLDOWN_MIN", "10"))
+    ids = [user["brand_id"]] if user["role"] == "admin" else [m["brand_id"] for m in q(
+        "SELECT brand_id FROM memberships WHERE user_id=?", (user["id"],))]
+    vals = []
+    for b in ids:
+        r = q("SELECT registry FROM brands WHERE id=?", (b,))
+        if r:
+            v = json.loads(r[0]["registry"] or "{}").get("security", {}).get("reset_cooldown_min")
+            if v:
+                vals.append(int(v))
+    return max(vals) if vals else default
+
+
+def security_card(u):
+    reg = load_reg(u)
+    cd = reg.get("security", {}).get("reset_cooldown_min", int(os.environ.get("RESET_COOLDOWN_MIN", "10")))
+    return ui.card("Security",
+                   f'<form method="post" action="/admin/security" data-lock><label for="rc">Password reset cool-down (minutes)</label>'
+                   f'<input id="rc" name="reset_cooldown_min" type="number" min="1" max="1440" value="{int(cd)}" style="max-width:200px">'
+                   f'<p class="hint">After someone in your company asks for a password reset email, they must wait this long before '
+                   f'asking again. Reset links work for {ACC.RESET_MINUTES} minutes and only once. Adding people needs a code '
+                   f'emailed to the builder; a list of people needs a fresh code every time. Limits: {INVITES_PER_DAY} invites a '
+                   f'day per company, {UPLOADS_PER_HOUR} submissions an hour per person.</p>'
+                   f'<button class="btn" type="submit">Save</button></form>')
+
+
+@app.post("/admin/security")
+def security_save(request: Request, reset_cooldown_min: str = Form("10")):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    try:
+        v = int(reset_cooldown_min)
+        if not 1 <= v <= 1440:
+            raise ValueError
+    except ValueError:
+        request.session["flash"] = "Enter a number of minutes between 1 and 1440."
+        return RedirectResponse("/admin/team", 303)
+    reg = load_reg(u)
+    reg.setdefault("security", {})["reset_cooldown_min"] = v
+    save_reg(u, reg)
+    log(None, u["name"], "RULE_CHANGED", f"Password reset cool-down set to {v} minutes", u["brand_id"])
+    request.session["flash"] = f"Saved. Password reset cool-down is {v} minutes."
+    return RedirectResponse("/admin/team", 303)
+
+
+# ---- password reset
+FORGOT_MSG = ("If an account with that email exists, we have sent a link to reset the password. It works for "
+              f"{60} minutes. Check the spam folder too.")
+
+
+@app.get("/forgot", response_class=HTMLResponse)
+def forgot_form(request: Request):
+    return page("Reset password", auth_form("Reset your password", "Enter the email you sign in with. We will email you a link.",
+                                            [("email", "Email", "email", "", True, "email")], "/forgot", "Email me a link",
+                                            extra='<p class="muted" style="margin-top:14px"><a href="/login">Back to sign in</a></p>'))
+
+
+@app.post("/forgot", response_class=HTMLResponse)
+def forgot(request: Request, email: str = Form("")):
+    ok_, wait_ = RL.hit("forgot:" + client_ip(request), 10, 3600)
+    if not ok_:
+        return page("Reset password", auth_form("Reset your password", "", [], "/forgot", "Email me a link",
+                                                f"Too many requests from this network. Try again in {RL.wait_text(wait_)}."))
+    clean = ACC.clean_email(email)
+    if clean:
+        rows = q("SELECT * FROM users WHERE lower(email)=?", (clean,))
+        if rows:
+            user, tok = ACC.request_reset(clean, reset_cooldown_for(rows[0]))
+            if user:
+                link = f"{public_base(request)}/reset/{tok}"
+                send_later(clean, "Reset your BrandGuard password",
+                           f"Hello {user['name']},\n\nOpen this link to choose a new password (works once, for "
+                           f"{ACC.RESET_MINUTES} minutes):\n{link}\n\nIf you did not ask for this, ignore this email. "
+                           f"Your password stays the same.")
+                log(None, user["name"], "PASSWORD_RESET_REQUESTED", "Reset link emailed", user["brand_id"])
+    return page("Reset password", '<div style="max-width:460px;margin:0 auto"><h1>Check your email</h1>'
+                + ui.alert(e(FORGOT_MSG), "info") + '<p><a href="/login">Back to sign in</a></p></div>')
+
+
+@app.get("/reset/{token}", response_class=HTMLResponse)
+def reset_form(request: Request, token: str, err: str = ""):
+    r = ACC.get_reset(token)
+    if not r:
+        return page("Reset password", '<div style="max-width:460px;margin:0 auto">' + ui.alert(
+            "This reset link is not valid any more. Ask for a new one.", "bad") + '<p><a href="/forgot">Reset password</a></p></div>')
+    return page("Reset password", auth_form(f"New password for {e(r['email'])}", "Choose a new password.",
+                                            [("password", f"New password (at least {ACC.MIN_PASSWORD} characters)", "password", "", True, "new-password"),
+                                             ("confirm", "Type it again", "password", "", True, "new-password")],
+                                            f"/reset/{token}", "Save new password", err))
+
+
+@app.post("/reset/{token}", response_class=HTMLResponse)
+def reset_save(request: Request, token: str, password: str = Form(""), confirm: str = Form("")):
+    if password != confirm:
+        return reset_form(request, token, "The two passwords are different.")
+    try:
+        uid = ACC.complete_reset(token, password)
+    except ValueError as ex_:
+        return reset_form(request, token, str(ex_))
+    user = q("SELECT * FROM users WHERE id=?", (uid,))[0]
+    log(None, user["name"], "PASSWORD_RESET", "Password changed with a reset link; other sessions signed out", user["brand_id"])
+    send_later(user["email"], "Your BrandGuard password was changed",
+               "Your password was just changed. If this was not you, reset it again now and tell your company.")
+    start_session(request, uid)
+    request.session["flash"] = "Password changed. You are signed in, and any other sign-ins have ended."
+    return RedirectResponse("/", 303)
+
+
+# ---- account page
+@app.get("/account", response_class=HTMLResponse)
+def account_page(request: Request):
+    u = me(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    on = int(u["notify"] if u["notify"] is not None else 1)
+    notif = (f'<form method="post" action="/account/notify" data-lock><label><input type="checkbox" name="notify" value="1" '
+             f'{"checked" if on else ""}> Email me about my reviews</label>'
+             f'<p class="hint">{"Results, decisions and disputes on your submissions." if u["role"] == "submitter" else "New items in the Review Queue and new disputes."}'
+             f'{"" if real_email(u["email"]) else " This demo account has no real email, so nothing is sent."}</p>'
+             f'<button class="btn secondary" type="submit">Save</button></form>')
+    pw = ('<p class="muted">Demo accounts have no password.</p>' if not u["pw_hash"] else
+          f'<form method="post" action="/account/password" data-lock>'
+          f'<label for="cp">Current password</label><input id="cp" name="current" type="password" required autocomplete="current-password">'
+          f'<label for="np">New password (at least {ACC.MIN_PASSWORD} characters)</label>'
+          f'<input id="np" name="new" type="password" required autocomplete="new-password">'
+          f'<button class="btn" type="submit">Change password</button>'
+          f'<p class="hint">Changing it signs you out on every other device.</p></form>')
+    body = (ui.page_header("My account", f"{e(u['name'])} · {e(u['email'] or '')}")
+            + '<div class="stack">' + ui.card("Email notifications", notif) + ui.card("Password", pw) + "</div>")
+    return page("My account", body, u, "account", [("My account", None)], request)
+
+
+@app.post("/account/notify")
+def account_notify(request: Request, notify: str = Form("")):
+    u = me(request)
+    if u:
+        ex("UPDATE users SET notify=? WHERE id=?", (1 if notify else 0, u["id"]))
+        request.session["flash"] = "Saved."
+    return RedirectResponse("/account", 303)
+
+
+@app.post("/account/password")
+def account_password(request: Request, current: str = Form(""), new: str = Form("")):
+    u = me(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    ok_, wait_ = RL.hit(f"pwchange:{u['id']}", 5, 900)
+    if not ok_:
+        request.session["flash"] = f"Too many tries. Wait {RL.wait_text(wait_)}."
+        return RedirectResponse("/account", 303)
+    try:
+        ACC.change_password(u["id"], current, new)
+    except ValueError as ex_:
+        request.session["flash"] = str(ex_)
+        return RedirectResponse("/account", 303)
+    start_session(request, u["id"])
+    log(None, u["name"], "PASSWORD_CHANGED", "Password changed; other sessions signed out", u["brand_id"])
+    request.session["flash"] = "Password changed. Other sign-ins have ended."
+    return RedirectResponse("/account", 303)
+
+
+# ---- email notifications
+def send_later(to, subject, text):
+    """Send in the background so a slow email service never slows the page. Fake demo addresses are skipped."""
+    if not real_email(to) or not mailer.configured():
+        return
+    if os.environ.get("MAIL_SYNC") == "1":       # tests
+        mailer.send(to, subject, text)
+        return
+    threading.Thread(target=mailer.send, args=(to, subject, text), daemon=True).start()
+
+
+NOTE_STATUS = {
+    "AUTO_APPROVED": "was approved", "APPROVED": "was approved by a reviewer", "REJECTED": "was rejected",
+    "REJECTED_FINAL": "was rejected by a reviewer", "BLOCKED": "was blocked (confidential information)",
+    "SUPERVISION": "needs a person to check it", "NEEDS_CONFIRMATION": "needs you to confirm the project or product",
+}
+
+
+def _sub_summary(s, rep):
+    lines = []
+    for f in rep.get("findings", []):
+        if f["status"] in ("FLAG", "SUPERVISION") and not f.get("dismissed"):
+            lines.append(f"- {TYPE_LABEL.get(f['type'], f['type'])}: {str(f['evidence'])[:80]}")
+    return "\n".join(lines[:6])
+
+
+def notify_result(sid, decided_by="", note=""):
+    s = get_sub(sid)
+    if not s:
+        return
+    owner = q("SELECT * FROM users WHERE id=?", (s["user_id"],))
+    rep = rep_of(s)
+    what = NOTE_STATUS.get(s["status"])
+    if owner and what and int(owner[0]["notify"] if owner[0]["notify"] is not None else 1):
+        reasons = _sub_summary(s, rep)
+        body = (f"Hello {owner[0]['name']},\n\nYour submission \"{s['filename']}\" {what}."
+                + (f"\nDecided by {decided_by}." if decided_by else "")
+                + (f"\nReviewer's note: {note}" if note else "")
+                + (f"\n\nWhat to look at:\n{reasons}" if reasons and s["status"] not in ("AUTO_APPROVED", "APPROVED") else "")
+                + f"\n\nOpen the full result: {os.environ.get('PUBLIC_URL', '').rstrip('/')}/s/{sid}\n")
+        send_later(owner[0]["email"], f"BrandGuard: \"{s['filename']}\" {what}", body)
+    if s["status"] == "SUPERVISION" and not decided_by:
+        notify_builders(sid, "supervision")
+
+
+def notify_builders(sid, why):
+    s = get_sub(sid)
+    if not s:
+        return
+    who = q("SELECT name FROM users WHERE id=?", (s["user_id"],))
+    text = {"supervision": "needs a person to check it", "dispute": "was disputed by the creator"}[why]
+    for b in q("SELECT * FROM users WHERE role='admin' AND brand_id=?", (s["brand_id"],)):
+        if int(b["notify"] if b["notify"] is not None else 1):
+            send_later(b["email"], f"BrandGuard: a submission {text}",
+                       f"\"{s['filename']}\" from {who[0]['name'] if who else 'a creator'} {text}.\n\n"
+                       f"Open it: {os.environ.get('PUBLIC_URL', '').rstrip('/')}/s/{sid}\n")
+
+
 @app.post("/admin/team/invite")
 async def team_invite(request: Request):
     u = admin_only(request)
     if not u:
         return RedirectResponse("/", 303)
     f = await request.form()
+    if otp_needed(u) and not otp_fresh(request):
+        request.session["flash"] = "Confirm it is you first: enter the code we email you."
+        return RedirectResponse("/admin/team#verify", 303)
+    left = invites_left_today(u)
+    if left <= 0:
+        request.session["flash"] = f"Your company has created {INVITES_PER_DAY} invites today, the daily limit. Try again tomorrow."
+        return RedirectResponse("/admin/team", 303)
     pids = [int(p) for p in f.getlist("project_id") if str(p).isdigit() and own_project(u, int(p))]
     all_p = bool(f.get("all_projects"))
     try:
@@ -3862,7 +4231,7 @@ def process_job(job):
     p = Path(job["path"])
     if not p.exists():
         return None, "The stored file is missing. It may have been cleared when the server restarted. Upload it again."
-    sid, msg = review_submission(rows[0], job["brand_id"], p, job["sha"], job["filename"], job["language"],
+    sid, msg = review_submission(rows[0], job["brand_id"], p, job["sha"], job["filename"], job["language"], notify=False,
                                  hint_pid=job["hint_pid"])
     return sid, msg
 
@@ -3947,6 +4316,8 @@ def bulk_submit(request: Request, brand_id: int = Form(...), language: str = For
     files = [f for f in files if f and f.filename]
     if not files:
         return err_page(u, "Choose at least one file.")
+    if too_many_uploads(u, len(files)):
+        return err_page(u, too_many_uploads(u, len(files)))
     if len(files) > BULK_MAX_FILES:
         return err_page(u, f"Upload at most {BULK_MAX_FILES} files at a time.")
     if JOBS.pending_count(u["id"]) + len(files) > BULK_MAX_PENDING:
@@ -4057,6 +4428,10 @@ def suggest_wording(request: Request, sid: int, i: int):
     u, s = me(request), get_sub(sid)
     if not (u and s and can_view(u, s)):
         return RedirectResponse("/", 303)
+    ok_, wait_ = RL.hit(f"suggest:{u['id']}", 30, 3600)
+    if not ok_:
+        request.session["flash"] = f"You have asked for many suggestions. Try again in {RL.wait_text(wait_)}."
+        return RedirectResponse(f"/s/{sid}", 303)
     rep = rep_of(s)
     fs = rep.get("findings", [])
     if not (0 <= i < len(fs)) or fs[i]["type"] not in SUGGESTABLE:
