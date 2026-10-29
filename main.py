@@ -10,6 +10,7 @@ import re
 import secrets
 import sqlite3
 import subprocess
+import time
 import uuid
 from collections import Counter
 from datetime import datetime
@@ -245,8 +246,14 @@ def page(title, body, user=None, active="", crumbs=None, request=None):
                     (user["brand_id"],))[0]["c"]
     demo = [] if user["pw_hash"] else [(k, lbl, DEMO[k] == user["id"]) for k, lbl in
                                        (("admin", "Builder"), ("partner", "Channel Partner"), ("freelancer", "Freelancer"))]
+    general = False
+    if user["role"] == "admin" and user["brand_id"]:
+        try:
+            general = load_reg(user).get("domain", "property") != "property"
+        except Exception:
+            general = False
     return HTMLResponse(ui.shell(title, body, user, ROLE_LABEL[user["role"]], active, crumbs,
-                                 queue_n, company, flash, demo))
+                                 queue_n, company, flash, demo, general))
 
 
 def err_page(u, msg, request=None):
@@ -1110,6 +1117,45 @@ def store_projects(sid, rep, actor):
 
 
 def review_submission(u, brand_id, path, sha, filename, language, source_url=None, caption="", hint_pid=None):
+    """Review one file, then delete the uploaded copy. Only the report, transcript and file hash are kept, so the
+    file can still be verified later by its hash, and uploads do not fill the disk."""
+    try:
+        return _review_submission(u, brand_id, path, sha, filename, language, source_url, caption, hint_pid)
+    finally:
+        remove_upload(path)
+
+
+def remove_upload(path):
+    if os.environ.get("KEEP_UPLOADS") == "1":
+        return
+    try:
+        p = Path(path).resolve()
+        if UPLOAD_DIR.resolve() in p.parents and p.is_file():
+            p.unlink()
+    except Exception:
+        pass
+
+
+def sweep_uploads(max_age_hours=24):
+    """Delete leftover uploads (from crashes) older than a day, except files still waiting in the bulk queue."""
+    if os.environ.get("KEEP_UPLOADS") == "1" or not UPLOAD_DIR.exists():
+        return 0
+    try:
+        waiting = {str(Path(r["path"]).resolve()) for r in q("SELECT path FROM jobs WHERE status IN ('QUEUED','PROCESSING')")}
+    except Exception:
+        waiting = set()
+    cutoff, n = time.time() - max_age_hours * 3600, 0
+    for f in UPLOAD_DIR.iterdir():
+        try:
+            if f.is_file() and f.stat().st_mtime < cutoff and str(f.resolve()) not in waiting:
+                f.unlink()
+                n += 1
+        except Exception:
+            pass
+    return n
+
+
+def _review_submission(u, brand_id, path, sha, filename, language, source_url=None, caption="", hint_pid=None):
     """Review one file and store the result. Returns (submission_id, None) or (None, message)."""
     brand = q("SELECT * FROM brands WHERE id=?", (brand_id,))[0]
     reg = json.loads(brand["registry"])
@@ -3526,6 +3572,7 @@ def run_queue_once():
 @app.on_event("startup")
 def start_worker():
     JOBS.reset_stuck()
+    sweep_uploads()
     if os.environ.get("BG_WORKER", "1") != "0":
         JOBS.start(process_job, notify_batch)
 

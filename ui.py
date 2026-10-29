@@ -70,7 +70,7 @@ NAV_ADMIN = [
 ]
 NAV_SUB = [
     ("overview", "/", "My Dashboard", "home"),
-    ("submit", "/submit", "Submit a Video", "upload"),
+    ("submit", "/submit", "Submit Content", "upload"),
     ("bulk", "/bulk", "Bulk Upload", "upload"),
     ("reviews", "/reviews", "My Submissions", "folder"),
     ("disputes", "/disputes", "Disputes", "scale"),
@@ -487,13 +487,19 @@ def landing(body):
             f'<div id="toasts" role="status" aria-live="polite"></div><script>{JS}</script></body></html>')
 
 
+GENERAL_LABELS = {"facts": "Products and Facts", "access": "Product Access"}
+
+
 def shell(title, body, user, role_label, active="", crumbs=None, queue_count=0,
-          company=None, flash="", demo_users=()):
-    """company = (current_id, [(id, name), ...]) for submitters; None otherwise."""
+          company=None, flash="", demo_users=(), general=False):
+    """company = (current_id, [(id, name), ...]) for submitters; None otherwise.
+    general = the company is not a property company, so it sells products, not projects."""
     is_admin = user["role"] == "admin"
     items = NAV_ADMIN if is_admin else NAV_SUB
     links = []
     for key, href, label, ic in items:
+        if general:
+            label = GENERAL_LABELS.get(key, label)
         cur = ' aria-current="page"' if key == active else ""
         cnt = f'<span class="count" aria-label="{queue_count} waiting">{queue_count}</span>' if key == "queue" and queue_count else ""
         links.append(f'<a href="{href}"{cur}>{icon(ic)}<span>{e(label)}</span>{cnt}</a>')
