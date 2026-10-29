@@ -66,6 +66,10 @@ _GENERAL_SPEC = {
               "best in the world", "world's best", "number one in the world", "no. 1 in the world", "100% सुरक्षित",
               "कोई जोखिम नहीं", "जोखीम नाही", "चमत्कार", "चमत्कारी", "no risk", "risk-free", "risk free", "zero risk",
               "miracle", "100% effective", "works every time", "never fails",
+              # investment-return promises, common on property and finance posters
+              "double your earnings", "double your money", "double your investment", "triple your money",
+              "watch your money grow", "grow your money", "your money will grow", "money will double",
+              "multiply your money", "earn while you sleep", "passive income guaranteed",
               "once in a lifetime"],
 }
 

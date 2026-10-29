@@ -158,6 +158,14 @@ def init_db():
         con.execute("INSERT INTO memberships VALUES (3, 2)")
     con.execute("UPDATE users SET name='Priya Freelance (Freelancer)', email='freelancer@demo.test' "
                 "WHERE id=3 AND name LIKE '%Fvideoanc%'")
+    # the two demo companies start with the general and real estate starter rules, like a real signup would
+    import packs as _packs
+    for bid, bname in con.execute("SELECT id, name FROM brands WHERE id IN (1, 2)").fetchall():
+        reg_ = json.loads(con.execute("SELECT registry FROM brands WHERE id=?", (bid,)).fetchone()[0] or "{}")
+        if bname in ("Demo Developer", "Sample Builders") and reg_.get("packs_seeded") != 2:
+            _packs.apply(reg_, ["real_estate"])
+            reg_["packs_seeded"] = 2
+            con.execute("UPDATE brands SET registry=? WHERE id=?", (json.dumps(reg_, ensure_ascii=False), bid))
     con.commit()
     con.close()
 
@@ -770,6 +778,64 @@ def transcribe_file(src: Path, lang: str, glossary):
 
         
 
+def _close(a, b):
+    """True if two words differ by at most one letter (two for long words): OCR and speech-to-text slips."""
+    if a == b:
+        return True
+    if len(b) < 4 or abs(len(a) - len(b)) > 2:
+        return False
+    limit = 2 if len(b) >= 8 else 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+        prev = cur
+        if min(prev) > limit:
+            return False
+    return prev[-1] <= limit
+
+
+def confidential_figures(text, confidential):
+    """A confidential subject stated with a number ("2% commission", "कमिशन 2 टक्के") even when the exact confidential
+    phrase ("dealer commission") is not used. The subject is the longest word of each confidential phrase, matched by
+    sound so Devanagari spellings count. Returns [(confidential phrase, heard words)]."""
+    import phon
+    toks = phon.tokens(text)
+    out = []
+    for ph in confidential:
+        words = [w for w in re.findall(r"[\w\u0900-\u097F]+", (ph or "").lower()) if len(phon.skel(w)) >= 3]
+        if not words:
+            continue
+        head = max(words, key=lambda w: len(phon.skel(w)))
+        hs = phon.skel(head)
+        for i, t in enumerate(toks):
+            if t != head and phon.skel(t) != hs:
+                continue
+            near = toks[max(0, i - 4):i + 5]
+            if any(re.fullmatch(r"\d+(?:[.,]\d+)?%?", w) for w in near) or "%" in text:
+                out.append((ph, " ".join(near)))
+                break
+    return out
+
+
+def near_banned(text, banned):
+    """Banned phrases (of at least two words) that appear in the text with small spelling slips but not exactly."""
+    toks = re.findall(r"[\w%']+", norm(text or "").lower())
+    out = []
+    low = " ".join(toks)
+    for ph in banned:
+        pt = re.findall(r"[\w%']+", norm(ph).lower())
+        if len(pt) < 2 or not ph.isascii() or (" " + " ".join(pt) + " ") in (" " + low + " "):
+            continue
+        for i in range(len(toks) - len(pt) + 1):
+            window = toks[i:i + len(pt)]
+            if all(_close(w, p) for w, p in zip(window, pt)) and sum(w != p for w, p in zip(window, pt)) <= 2:
+                out.append(ph)
+                break
+    return out
+
+
 def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_link=False, screen=None, use_lessons=True,
             kind="video"):
     """Rules plus project-aware claim checks. Never approves anything it could not fully check."""
@@ -792,6 +858,28 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
     sources += [(l["text"], l["start"], "screen") for l in screen_lines]
     if caption.strip():
         sources.append((caption, 0, "caption"))
+    # a banned phrase misread by OCR or speech-to-text ("watch your meney grow") is not an exact match, but a person must see it
+    exact = {(f.get("source"), norm(str(f["evidence"])).lower()) for f in rep["findings"] if f["type"] == "BANNED_PHRASE"}
+    near_seen = set()
+    secret_hit = {(f.get("source")) for f in rep["findings"] if f["type"] == "CONFIDENTIAL_DATA"}
+    for text, t, srcname in sources:
+        for phrase, heard in confidential_figures(text, reg.get("confidential", [])):
+            if srcname in secret_hit or (srcname, "c:" + phrase) in near_seen:
+                continue
+            near_seen.add((srcname, "c:" + phrase))
+            rep["findings"].append(make_finding(
+                "SUPERVISION", "HIGH", "CONFIDENTIAL_LIKELY", t, heard[:120],
+                f'A figure is given for something the company keeps confidential ("{phrase}").',
+                "Remove the figure unless the company has approved sharing it.", None, srcname))
+        for phrase in near_banned(text, reg.get("banned_phrases", [])):
+            if (srcname, phrase.lower()) in exact or (srcname, phrase.lower()) in near_seen:
+                continue
+            near_seen.add((srcname, phrase.lower()))
+            rep["findings"].append(make_finding(
+                "SUPERVISION", "MEDIUM", "BANNED_PHRASE_LIKELY", t, text[:120],
+                f'This looks like the banned phrase "{phrase}" with a letter or two misread by '
+                f'{"on-screen text reading" if srcname == "screen" else "speech recognition"}.',
+                "A person should check the wording. If it is the banned claim, remove it.", None, srcname))
     seen = set()
     for text, t, srcname in sources:
         low = norm(text).lower()
@@ -1222,6 +1310,8 @@ TYPE_LABEL = {
     "PROJECT_UNCERTAIN": "Could not link a claim to one project",
     "IDENTITY_WEAK": "Project not named in the content",
     "CUSTOM_CHECK": "Product fact does not match the approved value",
+    "BANNED_PHRASE_LIKELY": "Looks like a banned phrase (misread)",
+    "CONFIDENTIAL_LIKELY": "Confidential figure mentioned",
     "LOW_CONTRAST": "Text is hard to read (low contrast)", "SMALL_TEXT": "Text smaller than the brand minimum",
     "OFF_PALETTE": "Colour outside the brand palette", "LOGO_MISSING": "Brand logo not found", "NO_TEXT_FOUND": "No text found",
     "TERMINOLOGY": "Preferred wording", "TONE": "Tone of voice", "SPEECH_UNCLEAR": "Speech was hard to recognise",
@@ -1238,8 +1328,8 @@ SECTIONS = [
     ("Property facts (area, bathrooms, possession, RERA, offers, distance)",
      lambda t: not t.startswith("CUSTOM_") and (t.endswith("_CHECK") and not t.startswith("PRICE_") or t.endswith("_UNVERIFIABLE"))),
     ("Project and permission", lambda t: t in ("UNAUTHORIZED_PROJECT", "PROJECT_UNCERTAIN", "IDENTITY_WEAK")),
-    ("Restricted or banned language", lambda t: t == "BANNED_PHRASE"),
-    ("Confidential information", lambda t: t == "CONFIDENTIAL_DATA"),
+    ("Restricted or banned language", lambda t: t in ("BANNED_PHRASE", "BANNED_PHRASE_LIKELY")),
+    ("Confidential information", lambda t: t in ("CONFIDENTIAL_DATA", "CONFIDENTIAL_LIKELY")),
     ("Contact information", lambda t: t == "UNKNOWN_CONTACT"),
     ("Claims requiring evidence", lambda t: t == "UNSUPPORTED_CLAIM"),
     ("Different wording of a banned phrase (AI)", lambda t: t == "BANNED_PARAPHRASE"),
