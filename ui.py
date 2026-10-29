@@ -450,7 +450,7 @@ JS = """
     function onKey(ev){if(ev.key==='Escape')close();if(ev.key==='ArrowRight')go(i+1);if(ev.key==='ArrowLeft'&&i>0)go(i-1)}
     function go(n){
       if(n>=steps.length){close();return}
-      i=n;var s=steps[i],el=s.href?$('#side a[href="'+s.href+'"]'):null;
+      i=n;var s=steps[i],el=s.href?$('#side nav a[href="'+s.href+'"]'):null;
       var small=window.matchMedia('(max-width:900px)').matches;
       if(el&&small&&typeof nav==='function'&&!side.classList.contains('open')){nav(true);setTimeout(function(){go(n)},320);return}
       if(!ring){ring=document.createElement('div');ring.className='tour-ring';document.body.appendChild(ring)}

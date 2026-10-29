@@ -2,6 +2,7 @@
 """BrandGuard web app (Round 2) - link ingestion, caption check, stricter auto-approval."""
 
 import hashlib
+import io
 import html
 import json
 import math
@@ -3588,8 +3589,214 @@ def team_page(request: Request):
             + ui.card("People", ui.table(["Name", "Email", "Role", "Joined", ""], mrows, "People"))
             + ui.card("Pending invites", ui.table(["Email", "Role", "Expires", ""], irows, "Pending invites")
                       if irows else ui.empty("No pending invites"))
-            + ui.card("Invite someone", form) + "</div>")
+            + ui.card("Invite someone", form) + bulk_invite_card(word) + email_card(u) + "</div>")
     return page("Team and Invites", body, u, "team", [("Team and Invites", None)], request)
+
+
+INVITE_COLUMNS = ["Email", "Name", "Role", "Access"]
+ROLE_WORDS = {"channel partner": "partner", "partner": "partner", "cp": "partner", "freelancer": "freelancer",
+              "agency": "agency", "marketing agency": "agency", "manager": "manager", "builder": "manager", "admin": "manager"}
+
+
+def email_card(u):
+    p = mailer.provider()
+    state = {"brevo": "Email is sent through Brevo.", "smtp": "Email is sent through your SMTP server."}.get(
+        p, "Email is not set up, so invite links are shown on screen and you send them yourself.")
+    how = ("" if p else
+           '<p class="muted">To send invites automatically: create a free Brevo account (300 emails a day), verify the address '
+           'you send from, create an API key, then add <span class="mono">BREVO_API_KEY</span> and <span class="mono">MAIL_FROM</span> '
+           'in the server settings (Render: Environment). Render\'s free plan blocks normal email ports, so Gmail SMTP will not '
+           'work there; Brevo does.</p>')
+    btn = ('' if not p else f'<form method="post" action="/admin/email-test" data-lock><button class="btn secondary" type="submit">'
+           f'Send a test email to {e(u["email"] or "me")}</button></form>')
+    return ui.card("Email", f"<p>{e(state)}</p>{how}{btn}")
+
+
+@app.post("/admin/email-test")
+def email_test(request: Request):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    ok = bool(u["email"]) and mailer.send(u["email"], "BrandGuard test email",
+                                           "This is a test from BrandGuard. If you can read it, invites will be emailed.")
+    request.session["flash"] = (f"Test email sent to {u['email']}. Check the inbox and the spam folder." if ok
+                                else f"The test email was not sent. {mailer.last_error or 'Your account has no email address.'}")
+    return RedirectResponse("/admin/team", 303)
+
+
+def bulk_invite_card(word):
+    return ui.card("Invite many people from a spreadsheet",
+                   f'<p class="muted">One row per person. Columns: <b>Email</b>, <b>Name</b> (optional, used in the email), '
+                   f'<b>Role</b> (Channel partner, Freelancer, Agency or Manager) and <b>Access</b> (write <b>All</b>, or the '
+                   f'{word} names separated by commas; empty means All). You see every row before invites are created.</p>'
+                   f'<p><a class="btn secondary sm" href="/admin/team/template">Download the template (.xlsx)</a></p>'
+                   f'<form method="post" action="/admin/team/bulk" enctype="multipart/form-data" data-lock>'
+                   f'<input type="file" name="file" accept=".xlsx,.csv" required> '
+                   f'<button class="btn" type="submit">Read the list</button></form>')
+
+
+@app.get("/admin/team/template")
+def team_template(request: Request):
+    if not admin_only(request):
+        return RedirectResponse("/", 303)
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "People"
+    ws.append(INVITE_COLUMNS)
+    for c in ws[1]:
+        c.font, c.fill = Font(bold=True, color="FFFFFF"), PatternFill("solid", fgColor="1F3A5F")
+    for col, w in zip("ABCD", (34, 24, 20, 40)):
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = "A2"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return Response(buf.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": 'attachment; filename="brandguard-invite-list.xlsx"'})
+
+
+def read_people(filename, data):
+    """[{email, name, role, access}] from an .xlsx or .csv list."""
+    rows = []
+    if (filename or "").lower().endswith(".csv"):
+        import csv
+        text = data.decode("utf-8-sig", errors="replace")
+        for r in csv.DictReader(io.StringIO(text)):
+            rows.append({(k or "").strip().lower(): (v or "").strip() for k, v in r.items()})
+    else:
+        from openpyxl import load_workbook
+        try:
+            wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        except Exception:
+            raise ValueError("This file could not be read. Upload the filled template (.xlsx) or a .csv file.")
+        got = list(wb.worksheets[0].iter_rows(values_only=True))
+        if not got:
+            return []
+        head = [str(h or "").strip().lower() for h in got[0]]
+        for r in got[1:501]:
+            rows.append({head[i]: str(v).strip() if v is not None else "" for i, v in enumerate(r) if i < len(head)})
+    out = [r for r in rows if any(r.values())]
+    if out and "email" not in out[0]:
+        raise ValueError("The first row must have an Email column.")
+    return out[:500]
+
+
+def check_people(u, rows):
+    projects = RE.brand_projects(u["brand_id"])
+    names = {}
+    for p in projects:
+        for n in RE.names_of(p):
+            names[n.strip().lower()] = p
+    seen, out = set(), []
+    for r in rows:
+        email = ACC.clean_email(r.get("email", ""))
+        role_raw = (r.get("role") or "channel partner").strip().lower()
+        kind = ROLE_WORDS.get(role_raw) or (role_raw if role_raw in ACC.KINDS else "")
+        access = (r.get("access") or "all").strip()
+        problem, pids, all_p = "", [], False
+        if not email:
+            problem = f'"{r.get("email", "")}" is not an email address.'
+        elif email in seen:
+            problem = "This email is listed twice."
+        elif not kind:
+            problem = f'Role "{r.get("role")}" is not one of Channel partner, Freelancer, Agency, Manager.'
+        elif q("SELECT 1 FROM users WHERE lower(email)=? AND role='admin' AND brand_id=?", (email, u["brand_id"])):
+            problem = "Already a builder in your company."
+        elif ACC.KINDS[kind][1] == "submitter":
+            if access.lower() in ("all", "*", "everything"):
+                all_p = True
+            else:
+                for part in [x.strip() for x in access.split(",") if x.strip()]:
+                    p = names.get(part.lower())
+                    if not p:
+                        problem = f'"{part}" is not one of your projects or products.'
+                        break
+                    pids.append(p["id"])
+        seen.add(email)
+        out.append({"email": email or r.get("email", ""), "name": (r.get("name") or "")[:80], "kind": kind, "pids": pids,
+                    "all": all_p, "ok": not problem, "problem": problem,
+                    "access": "All" if all_p else ", ".join(RE.get_project(i)["official_name"] for i in pids) or "-"})
+    return out
+
+
+@app.post("/admin/team/bulk")
+def team_bulk(request: Request, file: UploadFile = File(...)):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    try:
+        people = check_people(u, read_people(file.filename, _read_small(file, 2)))
+        if not people:
+            raise ValueError("No people were found in the file.")
+    except ValueError as ex_:
+        request.session["flash"] = str(ex_)
+        return RedirectResponse("/admin/team", 303)
+    iid = IMP.save(u["brand_id"], "invites", file.filename or "Invite list", {"people": people}, u["name"])
+    return RedirectResponse(f"/admin/team/bulk/{iid}", 303)
+
+
+@app.get("/admin/team/bulk/{iid}", response_class=HTMLResponse)
+def team_bulk_preview(request: Request, iid: int):
+    u = admin_only(request)
+    meta, data = IMP.load(u["brand_id"], iid) if u else (None, None)
+    if not meta or meta["kind"] != "invites":
+        return RedirectResponse("/admin/team", 303)
+    people = data["people"]
+    rows = [[e(p["email"]), e(p["name"] or "-"), e(ACC.KINDS[p["kind"]][0] if p["kind"] else "-"), e(p["access"]),
+             ui.badge("Ready", "ok", "check") if p["ok"] else f'{ui.badge("Skipped", "warn", "alert")} <span class="muted">{e(p["problem"])}</span>']
+            for p in people]
+    n_ok = sum(1 for p in people if p["ok"])
+    sends = "Each person gets an email with their own link." if mailer.configured() else \
+        "Email is not set up, so you will get a list of links to send yourself."
+    form = ('' if meta["applied_at"] else
+            f'<form method="post" action="/admin/team/bulk/{iid}/send" data-lock><button class="btn" type="submit" '
+            f'{"disabled" if not n_ok else ""}>Create {n_ok} invite(s)</button></form>')
+    body = (ui.page_header("Check the invite list", f"{n_ok} of {len(people)} rows are ready. Rows with a problem are skipped. {sends}",
+                           '<a class="btn secondary" href="/admin/team">Back</a>')
+            + '<div class="stack">' + (ui.alert(f"Already sent on {e(meta['applied_at'])}.", "ok") if meta["applied_at"] else "")
+            + ui.card("People", ui.table(["Email", "Name", "Role", "Access", "Check"], rows, "Invite list") + form) + "</div>")
+    return page("Invite list", body, u, "team", [("Team and Invites", "/admin/team"), ("Invite list", None)], request)
+
+
+@app.post("/admin/team/bulk/{iid}/send", response_class=HTMLResponse)
+def team_bulk_send(request: Request, iid: int):
+    u = admin_only(request)
+    meta, data = IMP.load(u["brand_id"], iid) if u else (None, None)
+    if not meta or meta["kind"] != "invites" or meta["applied_at"]:
+        return RedirectResponse("/admin/team", 303)
+    IMP.mark_applied(iid)
+    company = q("SELECT name FROM brands WHERE id=?", (u["brand_id"],))[0]["name"]
+    results = []
+    for p in data["people"]:
+        if not p["ok"]:
+            continue
+        try:
+            tok = ACC.create_invite(u["brand_id"], p["email"], p["kind"], p["pids"], u["name"], all_projects=p["all"])
+        except ValueError as ex_:
+            results.append((p["email"], "", False, str(ex_)))
+            continue
+        link = f"{public_base(request)}/invite/{tok}"
+        hello = f"Hello {p['name']},\n\n" if p["name"] else ""
+        sent = mailer.send(p["email"], f"{u['name']} invited you to {company} on BrandGuard",
+                           f"{hello}{u['name']} has invited you to join {company} on BrandGuard as {ACC.KINDS[p['kind']][0]}.\n\n"
+                           f"Open this link to create your account (valid {ACC.INVITE_DAYS} days, single use):\n{link}\n")
+        results.append((p["email"], link, sent, ""))
+    n_sent = sum(1 for r in results if r[2])
+    n_made = sum(1 for r in results if r[1])
+    log(None, u["name"], "INVITE_CREATED", f"Bulk: {n_made} invite(s) created, {n_sent} emailed", u["brand_id"])
+    rows = [[e(em), ui.badge("Emailed", "ok", "check") if sent else (ui.badge("Not created", "bad", "x-circle") if not link
+             else ui.badge("Send yourself", "warn", "alert")),
+             (f'<input readonly value="{e(link)}" style="width:100%;margin:0" onclick="this.select()">' if link and not sent else e(err or ""))]
+            for em, link, sent, err in results]
+    note = ("Links are shown only on this page, once. Copy the ones marked 'Send yourself' now."
+            if n_made > n_sent else "Everyone was emailed.")
+    body = (ui.page_header("Invites created", f"{n_made} invite(s) created, {n_sent} emailed.",
+                           '<a class="btn" href="/admin/team">Back to Team</a>')
+            + '<div class="stack">' + ui.alert(note, "info" if n_made > n_sent else "ok")
+            + (ui.alert(f"Email problem: {e(mailer.last_error)}", "warn") if n_made > n_sent and mailer.configured() and mailer.last_error else "")
+            + ui.card("Results", ui.table(["Email", "Status", "Link"], rows, "Invite results")) + "</div>")
+    return page("Invites created", body, u, "team", [("Team and Invites", "/admin/team"), ("Invites created", None)], request)
 
 
 @app.post("/admin/team/invite")
@@ -3613,6 +3820,10 @@ async def team_invite(request: Request):
                        f"account (valid {ACC.INVITE_DAYS} days, single use):\n{link}\n")
     log(None, u["name"], "INVITE_CREATED", f"{ACC.clean_email(f.get('email', ''))} as {ACC.KINDS[f.get('kind')][0]}"
         + (" (emailed)" if sent else ""), u["brand_id"])
+    who = ACC.clean_email(f.get("email", ""))
+    request.session["flash"] = (f"Invite emailed to {who}. The link is also shown below." if sent else
+                                f"Invite created, but the email was not sent ({mailer.last_error}). Copy the link below and send it."
+                                if mailer.configured() else "Invite created. Copy the link below and send it to them.")
     return RedirectResponse("/admin/team", 303)
 
 
