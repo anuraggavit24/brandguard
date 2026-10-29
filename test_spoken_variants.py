@@ -54,5 +54,36 @@ with TestClient(main.app) as c:
         rep, got = run(lines)
         check(f"misspelled but wrong claim is caught: {name}", got.get(kind) == "VIOLATION", str(got))
 
+# a video whose speech is fine but whose on-screen text makes investment promises (OCR misread MONEY as MENEY)
+check("near match: one misread letter", main.near_banned("INVEST TODAY - WATCH YOUR MENEY GROW", ["watch your money grow"]) == ["watch your money grow"])
+check("near match: an exact phrase is left to the exact check", main.near_banned("watch your money grow", ["watch your money grow"]) == [])
+check("near match: different words are not matched", main.near_banned("watch our homes grow", ["watch your money grow"]) == [])
+check("near match: short words must be exact", main.near_banned("no hidden charge", ["no hidden charges"]) == ["no hidden charges"]
+      and main.near_banned("to hidden charges", ["no hidden charges"]) == [])
+with TestClient(main.app) as c:
+    reg = json.loads(main.q("SELECT registry FROM brands WHERE id=1")[0]["registry"])
+    check("demo company starts with the industry starter rules", "double your earnings" in reg["banned_phrases"] and len(reg["banned_phrases"]) > 100)
+    segs = [{"start": 0.0, "end": 3.0, "text": "Welcome to Demo Heights in Wakad, Pune. A 2 BHK at 1.3 crore.", "conf": 0.9}]
+    screen = {"lines": [{"start": 1.0, "end": 1.5, "text": l, "raw": l, "conf": 0.95} for l in
+                        ["DEMO HEIGHTS", "PRICE: 1.3 cr", "INVEST TODAY - WATCH YOUR MENEY GROW", "DOUBLE YOUR EARNINGS IN THE NEXT :"]],
+              "frames": 10, "total": 10, "partial": False}
+    rep = main.analyze(u, 1, segs, "", reg, hint_pid=pid, screen=screen)
+    ty = [(f["type"], f["status"]) for f in rep["findings"]]
+    check("on-screen 'double your earnings' is a violation", ("BANNED_PHRASE", "FLAG") in ty, str(ty))
+    check("on-screen misread 'watch your meney grow' goes to a person", ("BANNED_PHRASE_LIKELY", "SUPERVISION") in ty, str(ty))
+    check("the video is rejected, not approved", rep["verdict"].startswith("REJECT"), rep["verdict"])
+    check("a commission rate is caught even without the exact confidential phrase",
+          main.confidential_figures("Channel partners get 2% commission on every booking", ["dealer commission"]) != [])
+    check("Marathi spelling of commission with a rate is caught", main.confidential_figures("तुम्हाला 2 टक्के कमिशन मिळेल", ["dealer commission"]) != [])
+    check("the word alone, with no figure, is not flagged", main.confidential_figures("ask us about our commission policy", ["dealer commission"]) == [])
+    rep2 = main.analyze(u, 1, [{"start": 0.0, "end": 3.0, "text": "Demo Heights in Wakad, 2 BHK at 1.3 crore, and partners get 2% commission", "conf": 0.9}],
+                        "", reg, hint_pid=pid)
+    check("a spoken commission rate needs a person", ("CONFIDENTIAL_LIKELY", "SUPERVISION") in [(f["type"], f["status"]) for f in rep2["findings"]]
+          and not rep2["verdict"].startswith("PASS"), rep2["verdict"])
+    import ai_review as AIR
+    units = AIR.units_from(rep["inputs"])
+    check("the AI reviewer reads on-screen text as well as speech", any(x["src"] == "screen" and "EARNINGS" in x["text"] for x in units)
+          and any(x["src"] == "audio" for x in units))
+
 print("\n%d failed" % len(fails) if fails else "\nALL PASSED")
 sys.exit(1 if fails else 0)
