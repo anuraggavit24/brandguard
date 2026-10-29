@@ -30,8 +30,7 @@ from datetime import datetime
 
 import rewrite
 
-MODEL = os.environ.get("REVIEW_MODEL", "llama-3.3-70b-versatile")
-URL = os.environ.get("LESSON_URL", "https://api.groq.com/openai/v1/chat/completions")
+import llm
 DAILY_CAP = int(os.environ.get("AI_REVIEW_DAILY_CAP", "200"))      # new (non-cached) reviews per company per day
 PROMPT_VERSION = "1"
 DB_PATH = None
@@ -127,15 +126,7 @@ def dismiss(brand_id, quote):
 # ------------------------------------------------------------------ the model call
 def call_model(system, user):
     """Returns the model's text reply. Raises on any failure. Replaced in tests."""
-    import requests
-    key = os.environ.get("GROQ_API_KEY", "")
-    if not key:
-        raise RuntimeError("no key")
-    r = requests.post(URL, headers={"Authorization": f"Bearer {key}"}, timeout=25, json={
-        "model": MODEL, "temperature": 0, "response_format": {"type": "json_object"},
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]})
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
+    return json.dumps(llm.chat_json(system, user, specific_env="REVIEW_MODEL"))
 
 
 SYSTEM = (
@@ -216,9 +207,11 @@ def get_or_run(brand_id, units, reg):
         return None, "off"
     if used_today(brand_id) >= DAILY_CAP:
         return None, "capped"
+    global last_reason
     try:
         result = verify(ask(units, reg), units, reg)
-    except Exception:
+    except Exception as ex_:
+        last_reason = str(ex_)[:300]
         return None, "error"
     _run("INSERT OR REPLACE INTO ai_reviews (key, brand_id, result, created_at) VALUES (?,?,?,?)",
          (key, brand_id, json.dumps(result, ensure_ascii=False), _now()))
@@ -226,6 +219,7 @@ def get_or_run(brand_id, units, reg):
 
 
 _real_call_model = call_model
+last_reason = ""
 
 STATE_TEXT = {
     "cached": "AI review reused from an earlier identical review (no new AI call).",

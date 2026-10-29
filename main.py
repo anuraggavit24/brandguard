@@ -294,6 +294,22 @@ def health():
     return {"ok": True}
 
 
+@app.get("/ai-status")
+def ai_status(request: Request):
+    """Builder-only check that the text AI works: models tried, and the reason if it fails."""
+    import llm
+    if not admin_only(request):
+        return RedirectResponse("/", 303)
+    out = {"key_set": llm.configured(), "models_in_order": llm.models(), "test": None, "reason": ""}
+    if llm.configured():
+        try:
+            got = llm.chat_json('Reply with JSON only: {"ok": true}', "ping", timeout=20)
+            out["test"] = "ok" if got.get("ok") is True else f"unexpected reply: {str(got)[:80]}"
+        except Exception as ex_:
+            out["test"], out["reason"] = "failed", str(ex_)
+    return out
+
+
 @app.get("/ocr-status")
 def ocr_status(request: Request):
     if not admin_only(request):
@@ -960,6 +976,7 @@ def add_ai_review(rep, brand_id, reg):
         units = AIR.units_from(rep.get("inputs", {}))
         result, state = AIR.get_or_run(brand_id, units, reg)
         rep["ai_review"] = {"state": state, "text": AIR.STATE_TEXT.get(state, ""),
+                            "why": AIR.last_reason if state == "error" else "",
                             "summary": (result or {}).get("summary", ""),
                             "tone_consistent": (result or {}).get("tone_consistent", True)}
         for f in AIR.findings_for(result, brand_id, make_finding):
@@ -1569,6 +1586,8 @@ def view_submission(request: Request, sid: int):
     ai_card = ""
     if air:
         body_ = f'<p class="muted">{e(air.get("text", ""))}</p>'
+        if air.get("why") and admin:
+            body_ += f'<p class="muted" style="font-size:13px">Reason: {e(air["why"])}</p>'
         if air.get("summary"):
             body_ = (f'<p><b>What was said:</b> {e(air["summary"])}</p>'
                      + ('' if air.get("tone_consistent", True) else '<p>The tone changes during the video.</p>') + body_)

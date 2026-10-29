@@ -14,6 +14,7 @@ import unicodedata
 from datetime import date, datetime, timedelta
 
 from engine import classify_price, extract_prices, fmt_money, norm
+import phon
 
 POLICY_VERSION = "policy-2026.10-r2"
 DB_PATH = None
@@ -331,7 +332,8 @@ def can_use_project(user_id, project_id):
 # ----------------------------------------------------------- identification
 def _fold(s):
     s = unicodedata.normalize("NFKC", norm(s or "")).casefold()
-    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"[^\w\s\u0900-\u097F]", " ", s)   # keep Devanagari vowel signs (Python does not treat them as word characters)
+    s = re.sub(r"[\u0964\u0965]", " ", s)            # danda punctuation
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -639,11 +641,32 @@ NUMW = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
 BATH_RE = re.compile(r"(\d|one|two|three|four|five)\s*(?:bath(?:room)?s?|washrooms?|toilets?|बाथरूम|वॉशरूम)", re.I)
 
 
+BATH_WORDS = ["bathroom", "bathrooms", "washroom", "washrooms", "toilet", "toilets", "बाथरूम", "वॉशरूम", "टॉयलेट", "बाथ"]
+NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "एक": 1, "दोन": 2, "दो": 2, "तीन": 3,
+             "चार": 4, "पाच": 5, "पांच": 5, "सहा": 6, "छह": 6}
+
+
+def _bath_mentions(text):
+    """[(count, heard)]: '2 bathrooms', and spoken orders like 'बात्रुम तुम्हाला दोन' (any spelling of bathroom)."""
+    found = [((int(m.group(1)) if m.group(1).isdigit() else NUMW[m.group(1).lower()]), m.group(0))
+             for m in BATH_RE.finditer(norm(text))]
+    if found:
+        return found
+    toks = phon.tokens(text)
+    for i in phon.index_of(toks, BATH_WORDS):
+        for j in list(range(i + 1, min(len(toks), i + 5))) + list(range(max(0, i - 3), i))[::-1]:
+            tk = toks[j]
+            v = int(tk) if tk.isdigit() and len(tk) == 1 else NUM_WORDS.get(tk)
+            if v:
+                lo, hi = min(i, j), max(i, j)
+                found.append((v, " ".join(toks[lo:hi + 1])))
+                break
+    return found
+
+
 def check_bathrooms(project, text, t, src, conf, used):
     out = []
-    for m in BATH_RE.finditer(norm(text)):
-        raw = m.group(1).lower()
-        v = int(raw) if raw.isdigit() else NUMW[raw]
+    for v, heard in _bath_mentions(text):
         bhk = _bhk_in(text)
         units, specific = _units_for_bhk(project["id"], bhk)
         vals = []
@@ -651,7 +674,6 @@ def check_bathrooms(project, text, t, src, conf, used):
             uf = unit_facts(project["id"], u["id"])
             if "bathrooms" in uf:
                 vals.append((u, uf["bathrooms"]))
-        heard = m.group(0)
         if not vals:
             out.append(_claim("bathrooms", UNVERIFIABLE, project, t, src, heard, str(v), "No approved value",
                               "No approved bathroom count is stored for this unit.", "Add the bathroom count.", rule="bathrooms"))
@@ -678,6 +700,47 @@ READY_RE = re.compile(r"ready to move|ready possession|ready-to-move|immediate p
 POSS_RE = re.compile(r"(?:possession|handover|पझेशन|पजेशन|ताबा|कब्जा)[^.\n]{0,30}?(?:(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*,?\s*)?(20\d\d)", re.I)
 
 
+POSS_WORDS = ["possession", "handover", "पझेशन", "ताबा", "कब्जा", "हॅंडओव्हर", "हैंडओवर"]
+_MONTH_WORDS_INDIC = {"जानेवारी": 1, "जनवरी": 1, "फेब्रुवारी": 2, "फरवरी": 2, "मार्च": 3, "एप्रिल": 4, "अप्रैल": 4,
+                      "मे": 5, "मई": 5, "जून": 6, "जुलै": 7, "जुलाई": 7, "ऑगस्ट": 8, "अगस्त": 8, "सप्टेंबर": 9,
+                      "सितंबर": 9, "ऑक्टोबर": 10, "अक्टूबर": 10, "नोव्हेंबर": 11, "नवंबर": 11, "डिसेंबर": 12, "दिसंबर": 12}
+_MONTH_SKEL = {}
+for _w, _m in _MONTH_WORDS_INDIC.items():
+    _MONTH_SKEL.setdefault(phon.skel(_w), _m)
+
+
+def _indic_month(word):
+    return _MONTH_SKEL.get(phon.skel(word)) if len(phon.skel(word)) >= 2 else None
+
+
+class _Hit:
+    """Looks like a regex match: group(0) heard text, group(1) month word, group(2) year."""
+    def __init__(self, heard, month, year):
+        self._g = (heard, month, year)
+
+    def group(self, i):
+        return self._g[i]
+
+
+def _poss_spoken(text):
+    """Possession in any spelling ('पोजेशन तुम्हाला डेसेंबर 2028'), with a month word in English, Marathi or Hindi."""
+    toks = phon.tokens(text)
+    for i in phon.index_of(toks, POSS_WORDS):
+        window = toks[i + 1:i + 9]
+        for k, tk in enumerate(window):
+            if re.fullmatch(r"20\d\d", tk):
+                month = None
+                for w in reversed(window[:k]):
+                    if w[:3] in MONTHS and w.isascii():
+                        month = w
+                        break
+                    if _indic_month(w):
+                        month = w
+                        break
+                return _Hit(" ".join(toks[i:i + 2 + k]), month, tk)
+    return None
+
+
 def check_possession(project, text, t, src, conf, used):
     out = []
     t_norm = norm(text)
@@ -697,12 +760,14 @@ def check_possession(project, text, t, src, conf, used):
                 out.append(_claim("possession", VIOLATION, project, t, src, "ready to move", "ready", "Under construction",
                                   "The content says ready to move, but the project is recorded as under construction." + when,
                                   "Remove the ready-to-move claim or state the registered possession date.", f, _source_title(f), conf, "ready_to_move"))
-    m = POSS_RE.search(t_norm)
+    m = POSS_RE.search(t_norm) or _poss_spoken(text)
     if m:
         year = int(m.group(2))
-        month = MONTHS.get((m.group(1) or "")[:3].lower()) if m.group(1) else None
+        mg = m.group(1) or ""
+        month = (MONTHS.get(mg[:3].lower()) if mg.isascii() else _indic_month(mg)) if mg else None
         st, f, d = resolve_fact(project["id"], "possession")
-        claimed = f"{m.group(1).title() + ' ' if m.group(1) else ''}{year}"
+        claimed = (f"{month:02d}/{year}" if month else str(year)) if m.group(1) and not m.group(1).isascii() else \
+            f"{m.group(1).title() + ' ' if m.group(1) else ''}{year}"
         if st != "ok":
             out.append(_state_claim(st, d, "possession", project, t, src, m.group(0).strip(), claimed, "possession",
                                     "Add the registered possession date."))
@@ -787,11 +852,31 @@ def check_offers(project, text, t, src, conf, used):
 DIST_RE = re.compile(r"(\d{1,3})\s*(?:min(?:ute)?s?|मिनिट(?:ांवर|ात)?|मिनट)", re.I)
 
 
+DIST_CONTEXT = ["पासून", "इथून", "हून", "वरून", "पासुन", "से", "दूर", "ड्राइव", "कार", "car", "by", "minutes", "मिनिटात", "मिनटों"]
+
+
+def _landmark_spoken(name, text):
+    """An English landmark name heard in Marathi or Hindi ('Wakad bridge' as 'वाकड ब्रिच'): the place's main word
+    must match by sound; short or generic words (bridge, road, station) only help."""
+    parts = [p for p in re.split(r"\s+", name.strip()) if p]
+    if not parts:
+        return False
+    heard = {phon.latin_skel(t) for t in phon.tokens(text)}
+    main = max(parts, key=lambda p: len(phon.latin_skel(p)) if p.lower() not in GENERIC_PLACE else 0)
+    ms = phon.latin_skel(main)
+    return len(ms) >= 3 and ms in heard
+
+
+GENERIC_PLACE = {"bridge", "road", "station", "chowk", "circle", "highway", "airport", "mall", "park", "it", "metro",
+                 "railway", "bus", "stand", "square", "junction", "market", "hospital", "school", "college"}
+
+
 def check_distance(project, text, t, src, conf, used):
     out = []
     low = _fold(text)
     m = DIST_RE.search(norm(text))
-    if not m or not re.search(r"from|away|drive|walk|पासून|से दूर|अंतरावर|ड्राइव|walking", norm(text).lower()):
+    if not m or not (re.search(r"from|away|drive|walk|पासून|से दूर|अंतरावर|ड्राइव|walking", norm(text).lower())
+                     or phon.has_any(text, DIST_CONTEXT)):
         return out
     claimed = int(m.group(1))
     landmarks = _q("SELECT * FROM facts WHERE project_id=? AND key LIKE 'landmark:%'", (project["id"],))
@@ -800,7 +885,7 @@ def check_distance(project, text, t, src, conf, used):
         if not _is_current(f):
             continue
         name = f["key"].split(":", 1)[1]
-        if _fold(name) and _contains(low, _fold(name)):
+        if _fold(name) and (_contains(low, _fold(name)) or _landmark_spoken(name, text)):
             matched = True
             used.append(f)
             official = int(f["value_num"])

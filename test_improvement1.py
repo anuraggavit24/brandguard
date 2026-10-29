@@ -106,6 +106,7 @@ import requests as _rq
 
 
 class _Resp:
+    status_code, headers = 200, {}
     def __init__(self, content): self._c = content
     def raise_for_status(self): pass
     def json(self): return {"choices": [{"message": {"content": self._c}}]}

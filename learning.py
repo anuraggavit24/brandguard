@@ -43,8 +43,7 @@ STOP_WORDS = {"we", "our", "you", "your", "the", "a", "an", "is", "are", "was", 
               "did", "to", "of", "on", "in", "at", "this", "that", "these", "those", "here", "there", "for", "with",
               "and", "or", "it", "its", "be", "been", "as", "by", "from", "so", "any", "all"}
 CUE_SIDE = 3           # content words looked at on each side of the phrase
-LESSON_MODEL = os.environ.get("LESSON_MODEL", "llama-3.3-70b-versatile")
-LESSON_URL = os.environ.get("LESSON_URL", "https://api.groq.com/openai/v1/chat/completions")
+# the model is chosen in llm.py (AI_MODEL, or LESSON_MODEL for this feature only)
 
 
 # ------------------------------------------------------------------ storage
@@ -175,11 +174,8 @@ def summarise(ftype, trigger, sentence, creator_note, builder_note):
         user = json.dumps({"rule": ftype, "flagged_phrase": trigger, "sentence": sentence,
                            "creator_note": (creator_note or "")[:600], "builder_note": (builder_note or "")[:600]},
                           ensure_ascii=False)
-        r = requests.post(LESSON_URL, headers={"Authorization": f"Bearer {key}"}, timeout=20, json={
-            "model": LESSON_MODEL, "temperature": 0, "response_format": {"type": "json_object"},
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]})
-        r.raise_for_status()
-        data = json.loads(r.json()["choices"][0]["message"]["content"])
+        import llm
+        data = llm.chat_json(system, user, specific_env="LESSON_MODEL")
         return {
             "summary": str(data.get("summary", ""))[:240],
             "why": str(data.get("why", ""))[:300],

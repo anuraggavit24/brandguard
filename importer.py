@@ -19,8 +19,7 @@ from datetime import datetime
 import generic as GEN
 
 DB_PATH = None
-MODEL = os.environ.get("IMPORT_MODEL", os.environ.get("LESSON_MODEL", "llama-3.3-70b-versatile"))
-URL = os.environ.get("LESSON_URL", "https://api.groq.com/openai/v1/chat/completions")
+import llm
 MAX_TEXT = 24000
 MAX_ROWS = 400
 
@@ -240,15 +239,9 @@ def extract_text(filename, data):
 
 def call_model(system, user):
     """Returns the model's text reply. Raises on failure. Replaced in tests."""
-    import requests
-    key = os.environ.get("GROQ_API_KEY", "")
-    if not key:
+    if not llm.configured():
         raise RuntimeError("AI is not set up on this server. Use the spreadsheet template instead.")
-    r = requests.post(URL, headers={"Authorization": f"Bearer {key}"}, timeout=60, json={
-        "model": MODEL, "temperature": 0, "response_format": {"type": "json_object"},
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]})
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
+    return json.dumps(llm.chat_json(system, user, timeout=90, specific_env="IMPORT_MODEL"))
 
 
 SYSTEM = (
