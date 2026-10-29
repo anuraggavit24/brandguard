@@ -56,6 +56,22 @@ check("duplicate concern is shown once", len(run([con(), con()])["concerns"]) ==
 check("low-confidence note only for lines the recogniser was unsure about",
       len(run([con(category="low_confidence", quote="Our 2 BHK is priced at 1.3 crore", matches_banned="")])["concerns"]) == 1
       and run([con(category="low_confidence", quote="Your money is totally safe with us", matches_banned="")])["concerns"] == [])
+check("minor tone points are dropped", run([con(category="tone", matches_banned="", severity=1)])["concerns"] == [])
+check("clear tone problems are kept", len(run([con(category="tone", matches_banned="", severity=2)])["concerns"]) == 1)
+MR = [{"src": "audio", "time": 0, "text": "जर तुम्ही आज बुक केलं तर उद्या संधी नाही", "conf": 0.9}]
+check("an English rewrite of a Marathi line is dropped", run([con(category="tone", matches_banned="", quote="उद्या संधी नाही",
+      alternative="Book whenever you are ready")], units=MR)["concerns"][0]["alternative"] == "")
+check("a Marathi rewrite of a Marathi line is kept", run([con(category="tone", matches_banned="", quote="उद्या संधी नाही",
+      alternative="तुमच्या सोयीनुसार बुक करा")], units=MR)["concerns"][0]["alternative"] != "")
+check("Marathi content is detected", AIR.language_of([{"text": "तुम्हाला 2 BHK फ्लॅट मिळेल आणि पार्किंग फ्री आहे"}]) == "mr")
+check("Hindi content is detected", AIR.language_of([{"text": "आपको 2 BHK फ्लैट मिलेगा और पार्किंग फ्री है"}]) == "hi")
+check("English content is detected", AIR.language_of([{"text": "You get a 2 BHK flat with free parking"}]) == "en")
+SEEN = {}
+AIR.call_model, _keep = (lambda s, u: (SEEN.update(sys=s, user=u), json.dumps({"summary": "सारांश", "summary_en": "Summary", "concerns": []}))[1]), AIR.call_model
+r_ = AIR.verify(AIR.ask(MR, REG), MR, REG)
+check("the AI is asked to answer in Marathi for Marathi content, with an English summary too",
+      "Marathi" in SEEN["sys"] and "summary_en" in SEEN["sys"] and r_["summary"] == "सारांश" and r_["summary_en"] == "Summary" and r_["lang"] == "mr")
+AIR.call_model = _keep
 check("garbage model output gives an empty result", AIR.verify("nonsense", UNITS, REG)["concerns"] == [])
 check("at most 8 concerns", len(run([con(category="tone", quote=f"word{i}", matches_banned="") for i in range(20)],
                                    units=[{"src": "audio", "time": 0, "text": " ".join(f"word{i}" for i in range(20)), "conf": 1}])["concerns"]) <= 8)

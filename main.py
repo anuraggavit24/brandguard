@@ -978,6 +978,7 @@ def add_ai_review(rep, brand_id, reg):
         rep["ai_review"] = {"state": state, "text": AIR.STATE_TEXT.get(state, ""),
                             "why": AIR.last_reason if state == "error" else "",
                             "summary": (result or {}).get("summary", ""),
+                            "summary_en": (result or {}).get("summary_en", ""),
                             "tone_consistent": (result or {}).get("tone_consistent", True)}
         for f in AIR.findings_for(result, brand_id, make_finding):
             rep["findings"].append(f)
@@ -1589,8 +1590,10 @@ def view_submission(request: Request, sid: int):
         if air.get("why") and admin:
             body_ += f'<p class="muted" style="font-size:13px">Reason: {e(air["why"])}</p>'
         if air.get("summary"):
+            en = air.get("summary_en") or ""
             body_ = (f'<p><b>What was said:</b> {e(air["summary"])}</p>'
-                     + ('' if air.get("tone_consistent", True) else '<p>The tone changes during the video.</p>') + body_)
+                     + (f'<p class="muted"><b>In English:</b> {e(en)}</p>' if en and en != air["summary"] else "")
+                     + body_)
         ai_card = ui.card("AI review", body_, "Advice only. The AI never approves or rejects. Rules and people decide.")
     findings_card = ui.card("Compliance findings", "".join(parts))
     new_claims = [c for c in claims if "verdict" in c]
