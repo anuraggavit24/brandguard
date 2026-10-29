@@ -72,70 +72,142 @@ def mark_applied(imp_id):
 
 
 # ------------------------------------------------------------------ template
-HELP = [
-    "How to fill this template",
-    "",
-    "1. Products sheet: one row per variant. Write the product name on every row. Leave Variant empty for a product",
-    "   with no variants. Price is optional; write it as 9470, 9,470, 8.5 lakh or 1.2 crore.",
-    "   Other names: short names or Hindi / Marathi spellings people say, separated by commas.",
-    "2. Fact types sheet: the things your content makes claims about (Discount, Warranty, Mileage, Interest rate...).",
-    "   Type is one of: percent, money, number, date, yes_no, text.",
-    "   Unit is needed for number (kmpl, years, GB). Separate spellings with commas: kmpl, km/l.",
-    "   Rule: exact (must equal), max (must not be more: discounts, mileage, warranty),",
-    "   min (must not be less: interest rate, delivery date).",
-    "3. Facts sheet: the approved value of each fact for each product. Leave Variant empty if it applies to the whole product.",
-    "   Dates as 2027-03-15 or 2027-03. Yes/no as yes or no. Valid until is optional (offers that end).",
-    "4. Upload the file on Products and Facts > Import. You will see every row before anything is saved.",
-    "",
-    "Example rows are filled in. Replace them with your own.",
-]
+# One sheet, one row per product (or per variant), plain column names. The instructions live on the import page.
+COLUMNS = {
+    "general": ["Product", "Other names", "Variant", "Price (₹)", "Discount (%)", "Offer valid until",
+                "Warranty (years)", "Delivery date", "Free gift or extra"],
+    "property": ["Project", "Other names", "Unit type", "Price (₹)", "Carpet area (sq ft)", "Bathrooms",
+                 "Booking amount (₹)", "Possession (month year)", "RERA number", "Discount (%)", "Offer valid until"],
+}
+# what each column means, shown on the website next to the upload box
+COLUMN_HELP = {
+    "Product": ("Name of the product, the way it is written officially. Repeat it on every row of its variants.", "Zippy Hatchback"),
+    "Project": ("Official project name. Repeat it on every row of its unit types.", "Demo Heights"),
+    "Other names": ("Short names or Hindi / Marathi spellings people say, separated by commas. Fill once per product.", "Zippy, झिप्पी"),
+    "Variant": ("Model, plan, size or pack. Leave empty if the product has no variants.", "VXi"),
+    "Unit type": ("Flat or unit type. Write the BHK so it can be matched.", "2 BHK"),
+    "Price (₹)": ("Approved price. Digits, or lakh and crore.", "7.1 lakh"),
+    "Discount (%)": ("Highest discount that may be advertised. Claims above it are flagged.", "5"),
+    "Offer valid until": ("Last day of the discount or offer. After it, the offer is treated as expired.", "2026-12-31"),
+    "Warranty (years)": ("Warranty that may be advertised. Claims above it are flagged.", "3"),
+    "Delivery date": ("Earliest delivery date that may be promised.", "March 2027"),
+    "Free gift or extra": ("The exact free item, if any. Leave empty if there is none.", "Floor mats"),
+    "Carpet area (sq ft)": ("Approved carpet area of that unit type.", "720"),
+    "Bathrooms": ("Number of bathrooms in that unit type.", "2"),
+    "Booking amount (₹)": ("Approved booking amount for the project. Fill once.", "5 lakh"),
+    "Possession (month year)": ("Registered possession date. Fill once per project.", "December 2028"),
+    "RERA number": ("Project RERA registration number. Fill once per project.", "P52100012345"),
+}
 
 
-def template_xlsx():
+def template_xlsx(domain="general"):
     from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill
-    from openpyxl.worksheet.datavalidation import DataValidation
+    from openpyxl.styles import Alignment, Font, PatternFill
+    cols = COLUMNS["property" if domain == "property" else "general"]
     wb = Workbook()
     ws = wb.active
-    ws.title = "How to fill"
-    for i, line in enumerate(HELP, 1):
-        ws.cell(row=i, column=1, value=line)
-    ws["A1"].font = Font(bold=True, size=14)
-    ws.column_dimensions["A"].width = 120
-    head = Font(bold=True, color="FFFFFF")
-    fill = PatternFill("solid", fgColor="1F3A5F")
-
-    def sheet(name, cols, rows, widths):
-        s = wb.create_sheet(name)
-        s.append(cols)
-        for c in s[1]:
-            c.font, c.fill = head, fill
-        for r in rows:
-            s.append(r)
-        for i, w in enumerate(widths):
-            s.column_dimensions[chr(65 + i)].width = w
-        s.freeze_panes = "A2"
-        return s
-    sheet("Products", ["Product", "Other names", "Variant", "Price"],
-          [["Zippy Hatchback", "Zippy, ज़िप्पी", "LXi", "6.2 lakh"], ["Zippy Hatchback", "", "VXi", "7.1 lakh"],
-           ["Easy Car Loan", "car loan", "", ""]], [28, 30, 20, 16])
-    ft = sheet("Fact types", ["Name", "Type", "Unit", "Other words", "Rule"],
-               [["Discount", "percent", "", "off, सूट, सवलत", "max"], ["Mileage", "number", "kmpl, km/l", "average", "max"],
-                ["Interest rate", "percent", "", "rate of interest, ब्याज दर", "min"], ["Processing fee", "money", "", "", "exact"],
-                ["Free insurance", "yes_no", "", "", "exact"]], [22, 12, 18, 30, 10])
-    dv = DataValidation(type="list", formula1='"percent,money,number,date,yes_no,text"', allow_blank=False)
-    ft.add_data_validation(dv)
-    dv.add("B2:B500")
-    dv2 = DataValidation(type="list", formula1='"exact,max,min"', allow_blank=True)
-    ft.add_data_validation(dv2)
-    dv2.add("E2:E500")
-    sheet("Facts", ["Product", "Variant", "Fact", "Value", "Valid until"],
-          [["Zippy Hatchback", "", "Discount", "5", "2026-12-31"], ["Zippy Hatchback", "VXi", "Mileage", "22", ""],
-           ["Zippy Hatchback", "", "Free insurance", "no", ""], ["Easy Car Loan", "", "Interest rate", "8.75", ""],
-           ["Easy Car Loan", "", "Processing fee", "999", ""]], [24, 14, 20, 14, 14])
+    ws.title = "Projects" if domain == "property" else "Products"
+    ws.append(cols)
+    for c in ws[1]:
+        c.font, c.fill = Font(bold=True, color="FFFFFF"), PatternFill("solid", fgColor="1F3A5F")
+        c.alignment = Alignment(wrap_text=True, vertical="center")
+    ws.row_dimensions[1].height = 32
+    for i, name in enumerate(cols):
+        ws.column_dimensions[chr(65 + i)].width = max(14, min(28, len(name) + 4))
+    ws.freeze_panes = "A2"
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+# ------------------------------------------------------------------ reading the one-sheet template
+PROP_KEYS = {"carpet area": "carpet_sqft", "built up area": "builtup_sqft", "builtup area": "builtup_sqft",
+             "plot area": "plot_sqft", "bathrooms": "bathrooms", "balconies": "balconies", "parking": "parking",
+             "booking amount": "booking_amount", "possession": "possession", "rera number": "rera_no", "rera": "rera_no"}
+UNIT_LEVEL = {"carpet_sqft", "builtup_sqft", "plot_sqft", "bathrooms", "balconies", "parking"}
+ROLE = {"product": "name", "product name": "name", "project": "name", "project name": "name", "name": "name",
+        "other names": "aliases", "aliases": "aliases", "also called": "aliases",
+        "variant": "variant", "unit type": "variant", "model": "variant", "plan": "variant", "size": "variant",
+        "configuration": "variant", "price": "price", "mrp": "price", "offer valid until": "valid_to",
+        "valid until": "valid_to", "offer ends": "valid_to"}
+MAX_WORDS = ("discount", "cashback", "mileage", "warranty", "speed", "storage", "battery", "off", "range", "guarantee")
+MIN_WORDS = ("interest", "rate", "emi", "delivery", "tenure start")
+
+
+def split_header(h):
+    """'Warranty (years)' -> ('Warranty', 'years')."""
+    m = re.match(r"^\s*(.*?)\s*(?:\((.*?)\))?\s*$", h or "")
+    return (m.group(1) or "").strip(), (m.group(2) or "").strip()
+
+
+def infer(label, unit, values):
+    """Type and rule of a column the company added, from its name, its unit and its values."""
+    low, u = label.lower(), unit.lower()
+    vals = [v for v in values if v]
+    direction = "max" if any(w in low for w in MAX_WORDS) else "min" if any(w in low for w in MIN_WORDS) else "exact"
+    if u in ("%", "percent") or any(w in low for w in ("discount", "interest", "rate", "cashback %")):
+        return "percent", "", direction
+    if u in ("₹", "rs", "rs.", "inr", "rupees") or any(w in low for w in ("fee", "charge", "amount", "emi", "price")):
+        return "money", "", direction
+    if vals and all(v.strip().lower() in ("yes", "no", "y", "n") for v in vals):
+        return "yes_no", "", "exact"
+    if vals and all(GEN.parse_date(v) for v in vals) or any(w in low for w in ("date", "until", "deadline")):
+        return "date", "", direction
+    if u and (not vals or all(GEN._number(re.sub(r"[^\d.,]", "", v).replace(",", "")) is not None for v in vals)):
+        return "number", unit, direction
+    return "text", "", "exact"
+
+
+def parse_simple(rows):
+    """rows: list of dicts {header: value} from the one sheet. Returns a proposal."""
+    prop = empty()
+    prop["prop_facts"] = []
+    if not rows:
+        return prop
+    headers = list(rows[0].keys())
+    role, custom = {}, []
+    for h in headers:
+        label, unit = split_header(h)
+        key = re.sub(r"[^a-z ]", "", label.lower()).strip()
+        if key in ROLE:
+            role[h] = ROLE[key]
+        elif key in PROP_KEYS:
+            role[h] = "prop:" + PROP_KEYS[key]
+        elif label:
+            custom.append((h, label[:1].upper() + label[1:], unit))
+    if "name" not in role.values():
+        raise ValueError("The first row must have a Product (or Project) column.")
+    col = {v: h for h, v in role.items()}
+    products, last = {}, None
+    for r in rows:
+        name = (r.get(col["name"]) or "").strip() or (last or "")
+        if not name:
+            continue
+        last = name
+        p = products.setdefault(name.lower(), {"name": name, "aliases": [], "variants": []})
+        if "aliases" in col:
+            p["aliases"] += [a for a in GEN._list(r.get(col["aliases"], "")) if a not in p["aliases"]]
+        variant = (r.get(col.get("variant", ""), "") or "").strip()
+        price = (r.get(col.get("price", ""), "") or "").strip()
+        if (variant or price) and not any(v["name"].lower() == (variant or "Standard").lower() for v in p["variants"]):
+            p["variants"].append({"name": variant or "Standard", "price": price})
+        valid_to = (r.get(col.get("valid_to", ""), "") or "").strip()
+        for h, rl in role.items():
+            if rl.startswith("prop:") and (r.get(h) or "").strip():
+                prop["prop_facts"].append({"product": name, "variant": variant, "key": rl[5:], "value": r[h].strip()})
+        for h, label, unit in custom:
+            v = (r.get(h) or "").strip()
+            if v:
+                offer = any(w in label.lower() for w in ("discount", "offer", "gift", "cashback", "free"))
+                prop["values"].append({"product": name, "variant": variant, "fact": label, "value": v,
+                                       "valid_to": valid_to if offer else ""})
+    prop["products"] = list(products.values())
+    for h, label, unit in custom:
+        vals = [(r.get(h) or "").strip() for r in rows]
+        if any(vals):
+            ftype, unit2, direction = infer(label, unit, vals)
+            prop["fact_types"].append({"label": label, "ftype": ftype, "unit": unit2, "aliases": "", "direction": direction})
+    return prop
 
 
 # ------------------------------------------------------------------ reading a spreadsheet
@@ -172,7 +244,14 @@ def parse_xlsx(data):
         wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     except Exception:
         raise ValueError("This file could not be read as an Excel (.xlsx) file. Download the template and fill that.")
-    prop = empty()
+    names = [w.title.lower().replace(" ", "") for w in wb.worksheets]
+    if "facttypes" not in names:                       # the one-sheet template (current)
+        ws = wb.worksheets[0] if wb.worksheets[0].title.lower() not in ("how to fill",) else wb.worksheets[1]
+        prop = parse_simple(_sheet_rows(wb, ws.title))
+        if not (prop["products"] or prop["values"]):
+            raise ValueError("No rows were found under the column names. Fill the rows below the first row.")
+        return prop
+    prop = empty()                                     # the older three-sheet template still works
     products = {}
     for r in _sheet_rows(wb, "Products"):
         name = r.get("product", "")
@@ -295,7 +374,12 @@ def in_document(value, doc_text):
                (n.endswith(".0") and re.search(r"(?<![\d.])" + re.escape(n[:-2]) + r"(?![\d.])", flat)) for n in nums)
 
 
-def check(prop, doc_text=None, parse_price=None, existing_defs=()):
+PROP_LABEL = {"carpet_sqft": "Carpet area", "builtup_sqft": "Built-up area", "plot_sqft": "Plot area", "bathrooms": "Bathrooms",
+              "balconies": "Balconies", "parking": "Parking", "booking_amount": "Booking amount", "possession": "Possession",
+              "rera_no": "RERA number"}
+
+
+def check(prop, doc_text=None, parse_price=None, existing_defs=(), parse_fact=None):
     """Annotate every row with ok/problem. Returns a list of rows for the preview:
     [{"id", "kind", "text", "ok", "problem", "data"}]."""
     rows = []
@@ -347,6 +431,27 @@ def check(prop, doc_text=None, parse_price=None, existing_defs=()):
         rows.append({"kind": "value", "text": f'{v["product"]}' + (f' / {v["variant"]}' if v.get("variant") else "")
                      + f': {v["fact"]} = {v["value"]}' + (f' until {v["valid_to"]}' if v.get("valid_to") else ""),
                      "ok": not problem, "problem": problem, "data": v})
+    for f in prop.get("prop_facts", []):
+        problem, value = "", f["value"]
+        if f["key"] in UNIT_LEVEL and not f.get("variant"):
+            problem = "Write the unit type on this row: areas and bathrooms belong to a unit type."
+        elif f["key"] == "possession":
+            d = GEN.parse_date(value)
+            value = d[:7] if d else value
+            if not d:
+                problem = f'"{f["value"]}" is not a month and year, for example December 2028.'
+        elif f["key"] == "rera_no":
+            value = value.replace(" ", "").upper()
+        if not problem and parse_fact and f["key"] != "rera_no":
+            try:
+                parse_fact(f["key"], value)
+            except ValueError as ex_:
+                problem = str(ex_)
+        if not problem and not in_document(f["value"], doc_text):
+            problem = "This value was not found in the document."
+        rows.append({"kind": "prop_fact", "text": f'{f["product"]}' + (f' / {f["variant"]}' if f.get("variant") else "")
+                     + f': {PROP_LABEL.get(f["key"], f["key"])} = {f["value"]}', "ok": not problem, "problem": problem,
+                     "data": dict(f, value=value)})
     for i, r in enumerate(rows):
         r["id"] = i
     return rows

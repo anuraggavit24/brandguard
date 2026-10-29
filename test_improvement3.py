@@ -128,33 +128,49 @@ with TestClient(main.app) as a:
     st, rep, cl = submit("Glow Mixer 8 hazar rupaye with 30% discount")
     check("small product: wrong small price is caught", ("price", "VIOLATION") in cl or ("price", "REVIEW") in cl, f"{cl}")
 
-    # ---------------- spreadsheet import
-    data = IMP.template_xlsx()
-    check("template downloads as xlsx", a.get("/admin/import/template").content[:2] == b"PK")
-    prop = IMP.parse_xlsx(data)
-    check("template example rows are readable", len(prop["products"]) == 2 and len(prop["fact_types"]) == 5 and len(prop["values"]) == 5)
+    # ---------------- spreadsheet import (one sheet, plain columns, instructions on the website)
+    data = a.get("/admin/import/template").content
+    check("template downloads as xlsx", data[:2] == b"PK")
     from openpyxl import load_workbook
     wb = load_workbook(io.BytesIO(data))
-    wb["Products"].append(["Quick Scooter", "Quicky", "Base", "85000"])
-    wb["Facts"].append(["Quick Scooter", "", "Discount", "abc", ""])
-    wb["Facts"].append(["Ghost Product", "", "Discount", "5", ""])
+    ws = wb.worksheets[0]
+    heads = [x.value for x in ws[1]]
+    check("template is one sheet of plain column names, no instructions inside", len(wb.worksheets) == 1 and heads[0] == "Product"
+          and "Discount (%)" in heads and ws.max_row == 1, str(heads))
+    check("import page explains every column", all(h in a.get("/admin/import").text for h in heads)
+          and "Add your own columns" in a.get("/admin/import").text)
+    ws.cell(row=1, column=len(heads) + 1, value="Mileage (kmpl)")
+    ws.append(["Quick Scooter", "Quicky", "Base", "85000", "10", "2026-12-31", "2", "", "", "45"])
+    ws.append(["Quick Scooter", "", "Pro", "95000", "abc", "", "", "", "", "40"])
     buf = io.BytesIO(); wb.save(buf)
     r = a.post("/admin/import/sheet", files={"file": ("mine.xlsx", buf.getvalue(), "application/octet-stream")}, follow_redirects=False)
     iid = int(r.headers["location"].rsplit("/", 1)[-1])
     prev = a.get(f"/admin/import/{iid}").text
-    check("preview lists rows and the problems", "Quick Scooter" in prev and "Ghost Product" in prev and "not in the list" in prev)
-    check("nothing is saved before confirming", not any(x["official_name"] == "Quick Scooter" for x in RE.brand_projects(BID)))
     _, dat = IMP.load(BID, iid)
+    texts = {x["text"]: x for x in dat["rows"]}
+    check("preview lists rows and the problems", "Quick Scooter" in prev and any(not x["ok"] for x in dat["rows"]))
+    check("a new column with a unit becomes a number fact type", any(x["kind"] == "fact_type" and x["data"]["label"] == "Mileage"
+          and x["data"]["ftype"] == "number" and x["data"]["unit"] == "kmpl" and x["data"]["direction"] == "max" for x in dat["rows"]))
+    check("a bad value is marked, not saved", not texts["Quick Scooter / Pro: Discount = abc"]["ok"])
+    check("nothing is saved before confirming", not any(x["official_name"] == "Quick Scooter" for x in RE.brand_projects(BID)))
     good = [str(x["id"]) for x in dat["rows"] if x["ok"]]
     bad = [str(x["id"]) for x in dat["rows"] if not x["ok"]]
     a.post(f"/admin/import/{iid}/apply", data={"row": good + bad, "source": "Price list Nov 2026"})
-    qs = [x for x in RE.brand_projects(BID) if x["official_name"] == "Quick Scooter"]
-    check("confirmed rows are saved", bool(qs) and RE.resolve_fact(qs[0]["id"], "price", RE.unit_types(qs[0]["id"])[0]["id"])[1]["value_num"] == 85000)
-    check("rows with errors are never saved, even if ticked", not any(x["official_name"] == "Ghost Product" for x in RE.brand_projects(BID)))
+    qs = [x for x in RE.brand_projects(BID) if x["official_name"] == "Quick Scooter"][0]
+    base = [x for x in RE.unit_types(qs["id"]) if x["label"] == "Base"][0]
+    check("confirmed rows are saved", RE.resolve_fact(qs["id"], "price", base["id"])[1]["value_num"] == 85000)
+    disc = RE._q("SELECT * FROM facts WHERE project_id=? AND key='g:discount'", (qs["id"],))
+    check("the discount is saved with its end date, the bad one is not", len(disc) == 1 and disc[0]["valid_to"] == "2026-12-31")
     r2 = a.post(f"/admin/import/{iid}/apply", data={"row": good}, follow_redirects=False)
     check("an import cannot be saved twice", r2.headers["location"] == "/admin/import")
     r3 = a.post("/admin/import/sheet", files={"file": ("x.xlsx", b"not excel", "application/octet-stream")})
     check("a broken file gets a clear message", "could not be read" in r3.text)
+    old = io.BytesIO()
+    from openpyxl import Workbook
+    ow = Workbook(); ow.active.title = "Products"; ow.active.append(["Product", "Other names", "Variant", "Price"])
+    ow.active.append(["Old Format Fan", "", "", "2,499"]); ft = ow.create_sheet("Fact types"); ft.append(["Name", "Type", "Unit", "Other words", "Rule"])
+    fa = ow.create_sheet("Facts"); fa.append(["Product", "Variant", "Fact", "Value", "Valid until"]); ow.save(old)
+    check("the older three-sheet template is still read", IMP.parse_xlsx(old.getvalue())["products"][0]["name"] == "Old Format Fan")
 
     # ---------------- brochure import (AI mocked)
     doc = ("Sparkle Water Purifier. Model S1 price Rs 12,999. Model S2 price Rs 15,499. Festive discount 10%. "

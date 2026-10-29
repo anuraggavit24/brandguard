@@ -164,6 +164,12 @@ def add_project(brand_id, official_name, short_name="", city="", locality="", re
     for a in aliases:
         if a.strip():
             _ex("INSERT INTO project_aliases (project_id, alias) VALUES (?,?)", (pid, a.strip()))
+    # people invited to "all projects" get every new project at once
+    try:
+        for m in _q("SELECT user_id FROM memberships WHERE brand_id=? AND all_projects=1", (brand_id,)):
+            grant(m["user_id"], brand_id, pid, "all projects access")
+    except sqlite3.OperationalError:
+        pass
     return pid
 
 

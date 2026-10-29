@@ -42,7 +42,8 @@ def setup(db_path):
     DB_PATH = db_path
     con = sqlite3.connect(DB_PATH)
     for sql in ("ALTER TABLE users ADD COLUMN pw_hash TEXT", "ALTER TABLE users ADD COLUMN created_at TEXT",
-                "ALTER TABLE memberships ADD COLUMN kind TEXT", "ALTER TABLE memberships ADD COLUMN joined_at TEXT"):
+                "ALTER TABLE memberships ADD COLUMN kind TEXT", "ALTER TABLE memberships ADD COLUMN joined_at TEXT",
+                "ALTER TABLE memberships ADD COLUMN all_projects INTEGER DEFAULT 0"):
         try:
             con.execute(sql)
         except sqlite3.OperationalError:
@@ -202,22 +203,24 @@ def _hash_token(tok):
     return hashlib.sha256(tok.encode()).hexdigest()
 
 
-def create_invite(brand_id, email, kind, project_ids, invited_by):
-    """Returns the raw token (shown once). Raises ValueError on bad input."""
+def create_invite(brand_id, email, kind, project_ids, invited_by, all_projects=False):
+    """Returns the raw token (shown once). Raises ValueError on bad input.
+    all_projects: the person may use every project of the company, including ones added later."""
     email = clean_email(email)
     if not email:
         raise ValueError("Enter a valid email address.")
     if kind not in KINDS:
         raise ValueError("Choose a role.")
-    if KINDS[kind][1] == "submitter" and not project_ids:
-        raise ValueError("Tick at least one project this person may use.")
+    if KINDS[kind][1] == "submitter" and not project_ids and not all_projects:
+        raise ValueError("Choose what this person may promote: tick \"All projects\" or at least one project.")
     existing = _rows("SELECT * FROM users WHERE lower(email)=?", (email,))
     if existing and existing[0]["role"] == "admin" and existing[0]["brand_id"] == brand_id:
         raise ValueError("That person is already a builder in your company.")
     tok = secrets.token_urlsafe(32)
     _run("""INSERT INTO invites (token_hash, brand_id, email, kind, project_ids, invited_by, created_at, expires_at)
             VALUES (?,?,?,?,?,?,?,?)""",
-         (_hash_token(tok), brand_id, email, kind, json.dumps([int(p) for p in project_ids]), invited_by, _now(),
+         (_hash_token(tok), brand_id, email, kind, json.dumps(["*"] if all_projects else [int(p) for p in project_ids]),
+          invited_by, _now(),
           (datetime.now() + timedelta(days=INVITE_DAYS)).strftime("%Y-%m-%d %H:%M:%S")))
     return tok
 

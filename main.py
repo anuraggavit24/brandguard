@@ -2032,6 +2032,46 @@ def audit_page(request: Request):
 
 
 # ---------------------------------------------------------------- admin views
+def setup_checklist(u, brand):
+    """Getting-started steps for a new company. Returns '' once every step is done or the builder hid it."""
+    reg = json.loads(brand["registry"] or "{}")
+    ob = reg.get("onboarding", {})
+    if ob.get("hidden"):
+        return ""
+    bid = u["brand_id"]
+    general = reg.get("domain", "property") != "property"
+    things = "products" if general else "projects"
+    has_facts = bool(RE._q("SELECT 1 FROM facts f JOIN projects p ON p.id=f.project_id WHERE p.brand_id=? LIMIT 1", (bid,)))
+    has_team = bool(q("SELECT 1 FROM invites WHERE brand_id=? LIMIT 1", (bid,)) or q("SELECT 1 FROM memberships WHERE brand_id=? LIMIT 1", (bid,)))
+    has_sub = bool(q("SELECT 1 FROM submissions WHERE brand_id=? LIMIT 1", (bid,)))
+    steps = [
+        (bool(ob.get("rules_seen")), "Check your brand rules", "Your industry's starter rules are already in. Remove anything that does not apply, add your own banned phrases and confidential terms, and set brand colours and logo.", "/admin/rules", "Open Brand Rules"),
+        (has_facts, f"Add your {things} and their approved facts", "Prices, discounts, dates and other facts that every claim is checked against. Fastest: import the spreadsheet, or load sample data to try it out.", "/admin/projects", f"Open {things.title()} and Facts"),
+        (has_team, "Invite your team", "Channel partners, freelancers and agencies get a one-time link and can only submit for what you allow.", "/admin/team", "Invite people"),
+        (has_sub, "See your first review", "When someone submits content, the result appears in the Review Queue. To see a result now, use the demo files with a test partner account.", "/test-audio", "Open demo files"),
+    ]
+    if all(s[0] for s in steps):
+        return ""
+    done = sum(1 for s in steps if s[0])
+    items = "".join(f'<li class="{"done" if ok else ""}"><span class="dot">{"✓" if ok else n}</span><div><b>{e(t)}</b>'
+                    f'<div class="muted">{e(d)}</div>{"" if ok else f"<a class=\"btn secondary sm\" style=\"margin-top:8px\" href=\"{href}\">{e(btn)}</a>"}</div></li>'
+                    for n, (ok, t, d, href, btn) in enumerate(steps, 1))
+    return (f'<section class="card" aria-labelledby="gs"><div class="card-head"><h2 id="gs">Get started: {done} of {len(steps)} done</h2>'
+            f'<span><button type="button" class="btn secondary sm" data-tour-start>Take the tour</button> '
+            f'<form method="post" action="/admin/onboarding/hide" style="display:inline"><button class="btn secondary sm" type="submit">Hide</button></form></span></div>'
+            f'<ol class="checklist">{items}</ol></section>')
+
+
+@app.post("/admin/onboarding/hide")
+def onboarding_hide(request: Request):
+    u = admin_only(request)
+    if u:
+        reg = load_reg(u)
+        reg.setdefault("onboarding", {})["hidden"] = True
+        save_reg(u, reg)
+    return RedirectResponse("/", 303)
+
+
 def admin_dash(request, u):
     bid = u["brand_id"]
     brand = q("SELECT * FROM brands WHERE id=?", (bid,))[0]
@@ -2056,6 +2096,9 @@ def admin_dash(request, u):
       <p>Creators submit videos for {e(brand["name"])}. BrandGuard checks them against your approved facts and rules, and sends
       anything uncertain to you. Start with the Review Queue.</p>
       <ol class="steps"><li>Review submissions</li><li>Examine evidence</li><li>Approve, reject, or request supervision</li><li>Record the decision</li></ol></section>"""
+    setup = setup_checklist(u, brand)
+    if setup:
+        welcome = setup
     if queue:
         prio = sub_table(queue[:5], show_user=True, label="Priority reviews")
     else:
@@ -2129,6 +2172,9 @@ def rules_page(request: Request, err: str = ""):
     if not u:
         return RedirectResponse("/", 303)
     reg = load_reg(u)
+    if not reg.get("onboarding", {}).get("rules_seen"):
+        reg.setdefault("onboarding", {})["rules_seen"] = True
+        save_reg(u, reg)
     term = request.query_params.get("q", "").strip().lower()[:60]
     cards, dialogs = [], []
     for key, title, desc, ph in RULE_KINDS:
@@ -2887,6 +2933,27 @@ def apply_import(u, rows, source_title):
         RE.set_fact(p["id"], d["key"], num, txt, uid, unit, src, None, GEN.parse_date(v.get("valid_to", "")) or None,
                     u["name"], "Imported")
         made["values"] += 1
+    for r in rows:
+        if r["kind"] != "prop_fact":
+            continue
+        v = r["data"]
+        p = product(v["product"])
+        if v["key"] == "rera_no":
+            RE._ex("UPDATE projects SET rera_no=?, rera_level=? WHERE id=?",
+                   (v["value"], "format" if RE.rera_format_ok(v["value"]) else "none", p["id"]))
+            made["values"] += 1
+            continue
+        uid = None
+        if v.get("variant"):
+            ut = next((x for x in RE.unit_types(p["id"]) if x["label"].lower() == v["variant"].lower()), None)
+            uid = ut["id"] if ut else None
+        if v["key"] in IMP.UNIT_LEVEL and not uid:
+            continue                       # the unit type row was not ticked, so there is nothing to attach this to
+        num, txt = parse_fact_value(v["key"], v["value"])
+        unit = "INR" if v["key"] == "booking_amount" else ("sq ft" if v["key"].endswith("sqft") else "")
+        RE.set_fact(p["id"], v["key"], num, txt, uid if v["key"] in IMP.UNIT_LEVEL else None, unit, src, None, None,
+                    u["name"], "Imported")
+        made["values"] += 1
     return ", ".join(f"{n} {k}" for k, n in made.items() if n) or "nothing new"
 
 
@@ -2895,10 +2962,33 @@ def import_page(request: Request):
     u = admin_only(request)
     if not u:
         return RedirectResponse("/", 303)
+    domain = "property" if load_reg(u).get("domain", "property") == "property" else "general"
+    thing = "project" if domain == "property" else "product"
     sheet = (f'<ol><li><a class="btn secondary sm" href="/admin/import/template">Download the template (.xlsx)</a></li>'
-             f'<li>Fill the Products, Fact types and Facts sheets. Instructions are inside.</li><li>Upload it here.</li></ol>'
+             f'<li>Fill one row per {thing} (or per variant). The columns are explained below.</li><li>Upload it here.</li></ol>'
              f'<form method="post" action="/admin/import/sheet" enctype="multipart/form-data" data-lock>'
              f'<input type="file" name="file" accept=".xlsx" required> <button class="btn" type="submit">Read spreadsheet</button></form>')
+    guide_rows = [[f'<b>{e(c)}</b>', e(IMP.COLUMN_HELP.get(c, ("", ""))[0]), f'<span class="mono">{e(IMP.COLUMN_HELP.get(c, ("", ""))[1])}</span>']
+                  for c in IMP.COLUMNS[domain]]
+    guide = (ui.table(["Column", "What to write", "Example"], guide_rows, "Template columns")
+             + f'<h3 class="sec-title">Rules</h3><ul class="muted" style="padding-left:20px">'
+             f'<li>Leave a cell empty if it does not apply. Empty cells are skipped, never saved as zero.</li>'
+             f'<li>For a {thing} with variants, write one row per variant and repeat the {thing} name.</li>'
+             + (f'<li>Fill once-per-project columns (other names, booking amount, possession, RERA) on any one of its rows.</li>'
+                if domain == "property" else f'<li>Fill "Other names" once per product, on any one of its rows.</li>') +
+             f'<li>A value written on a variant row applies to that variant only. For a value that applies to the whole '
+             f'{thing}, add a row with the variant column empty, or repeat the value on every row.</li>'
+             f'<li>Dates can be 2027-03-15, 15 March 2027 or March 2027.</li></ul>'
+             f'<h3 class="sec-title">Add your own columns</h3><p class="muted">Anything else your content talks about can be a new '
+             f'column. Put the unit in brackets and BrandGuard works out the type from it and from the values:</p>'
+             + ui.table(["Column you add", "BrandGuard treats it as", "Rule"], [
+                 ["Mileage (kmpl)", "A number in kmpl", "Must not be more than this"],
+                 ["Interest rate (%)", "A percentage", "Must not be less than this"],
+                 ["Processing fee (₹)", "Money", "Must be exactly this"],
+                 ["Free insurance", "Yes or no (when the values are yes / no)", "Must match"],
+                 ["Colour options", "Text", "One of the written values must be used"]], "Own columns")
+             + '<p class="hint">You can change the type and rule of any column later on the Fact types page.</p>')
+    body_extra = ui.card("How to fill the spreadsheet", guide)
     ai_on = bool(os.environ.get("GROQ_API_KEY"))
     bro = (f'<p class="muted">PDF, Word, text or a photo of a price list. The AI proposes products and facts; every number '
            f'is checked against the document, and you confirm row by row.</p>'
@@ -2909,16 +2999,19 @@ def import_page(request: Request):
     body = (ui.page_header("Import products and facts", "Nothing is saved until you check the rows and confirm.",
                            '<a class="btn secondary" href="/admin/projects">Products and facts</a>')
             + '<div class="stack"><div class="cols-2">' + ui.card("Spreadsheet (no AI)", sheet) + ui.card("Brochure or price list (AI)", bro)
-            + "</div></div>")
+            + "</div>" + body_extra + "</div>")
     return page("Import", body, u, "facts", [("Products and Facts", "/admin/projects"), ("Import", None)], request)
 
 
 @app.get("/admin/import/template")
 def import_template(request: Request):
-    if not admin_only(request):
+    u = admin_only(request)
+    if not u:
         return RedirectResponse("/", 303)
-    return Response(IMP.template_xlsx(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    headers={"Content-Disposition": 'attachment; filename="brandguard-products-template.xlsx"'})
+    domain = "property" if load_reg(u).get("domain", "property") == "property" else "general"
+    name = "brandguard-projects-template.xlsx" if domain == "property" else "brandguard-products-template.xlsx"
+    return Response(IMP.template_xlsx(domain), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 def _read_small(up, limit_mb=10):
@@ -2940,7 +3033,7 @@ def import_sheet(request: Request, file: UploadFile = File(...)):
     except ValueError as ex_:
         request.session["flash"] = str(ex_)
         return RedirectResponse("/admin/import", 303)
-    rows = IMP.check(prop, None, parse_price, GEN.list_defs(u["brand_id"]))
+    rows = IMP.check(prop, None, parse_price, GEN.list_defs(u["brand_id"]), parse_fact_value)
     iid = IMP.save(u["brand_id"], "spreadsheet", file.filename or "Spreadsheet", {"rows": rows}, u["name"])
     return RedirectResponse(f"/admin/import/{iid}", 303)
 
@@ -2962,7 +3055,7 @@ def import_brochure(request: Request, file: UploadFile = File(...)):
         request.session["flash"] = (str(ex_) if "AI is not set up" in str(ex_)
                                     else "The AI could not read this document. Try again, or use the spreadsheet.")
         return RedirectResponse("/admin/import", 303)
-    rows = IMP.check(prop, text, parse_price, GEN.list_defs(u["brand_id"]))
+    rows = IMP.check(prop, text, parse_price, GEN.list_defs(u["brand_id"]), parse_fact_value)
     iid = IMP.save(u["brand_id"], "brochure", file.filename or "Brochure", {"rows": rows}, u["name"])
     return RedirectResponse(f"/admin/import/{iid}", 303)
 
@@ -2976,7 +3069,8 @@ def import_preview(request: Request, iid: int):
     if not meta:
         return RedirectResponse("/admin/import", 303)
     rows = data["rows"]
-    kind_label = {"fact_type": "Fact type", "product": "Product", "variant": "Variant and price", "value": "Approved value"}
+    kind_label = {"fact_type": "Fact type", "product": "Product", "variant": "Variant and price", "value": "Approved value",
+                  "prop_fact": "Property fact"}
     trs = []
     for r in rows:
         box = (f'<input type="checkbox" name="row" value="{r["id"]}" {"checked" if r["ok"] else ""} '
@@ -3362,8 +3456,8 @@ def signup(request: Request, company: str = Form(""), name: str = Form(""), emai
             "/signup", "Create company", str(ex_), industry=industry))
     start_session(request, uid)
     log(None, name.strip(), "COMPANY_CREATED", f"Company created: {company.strip()}", bid)
-    request.session["flash"] = "Company created. Add your first project, then invite your team."
-    return RedirectResponse("/admin/projects", 303)
+    request.session["flash"] = "Company created. Follow the steps on this page to finish setting up."
+    return RedirectResponse("/", 303)
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -3428,6 +3522,9 @@ def invite_accept(request: Request, token: str, name: str = Form(""), password: 
         return page("Join " + inv["company"], invite_html(inv, token, str(ex_)))
     pids = json.loads(inv["project_ids"] or "[]")
     who = q("SELECT name FROM users WHERE id=?", (uid,))[0]["name"]
+    if ACC.KINDS[kind][1] == "submitter" and "*" in pids:
+        ex("UPDATE memberships SET all_projects=1 WHERE user_id=? AND brand_id=?", (uid, bid))
+        pids = [p["id"] for p in RE.brand_projects(bid)]
     if ACC.KINDS[kind][1] == "submitter":
         for pid in pids:
             p = RE.get_project(int(pid))
@@ -3465,17 +3562,23 @@ def team_page(request: Request):
                       f'<form method="post" action="/admin/team/revoke" style="display:inline"><input type="hidden" name="invite_id" value="{i["id"]}">'
                       f'<button class="btn secondary sm" type="submit">Cancel</button></form>'])
     projects = RE.brand_projects(bid)
-    boxes = "".join(f'<label style="display:block"><input type="checkbox" name="project_id" value="{p["id"]}"> {e(p["official_name"])}</label>'
-                    for p in projects) or '<p class="muted">Add a project first (Projects and Facts), then invite people to it.</p>'
+    word = "projects" if load_reg(u).get("domain", "property") == "property" else "products"
+    boxes = (f'<label style="display:block;font-weight:600"><input type="checkbox" name="all_projects" value="1" checked '
+             f'id="allp"> All {word}, including ones you add later</label>'
+             + (f'<p class="hint" style="margin-top:6px">Or untick that and choose only some:</p>' if projects else
+                f'<p class="hint" style="margin-top:6px">You have no {word} yet. With this ticked, the person gets each one as you add it.</p>')
+             + "".join(f'<label style="display:block;margin-left:22px"><input type="checkbox" name="project_id" value="{p["id"]}"> '
+                       f'{e(p["official_name"])}</label>' for p in projects))
     kinds = "".join(f'<option value="{k}">{e(v[0])}</option>' for k, v in ACC.KINDS.items())
     mail_note = ("The invite is also emailed." if mailer.configured()
                  else "Email sending is not set up on this server, so copy the link and send it yourself.")
     form = (f'<form method="post" action="/admin/team/invite" data-lock><label for="ie">Email address</label>'
             f'<input id="ie" name="email" type="email" required><p></p><label for="ik">Role</label>'
-            f'<select id="ik" name="kind">{kinds}</select><p></p><b>Projects they may use</b><div>{boxes}</div>'
-            f'<p class="hint">Partners, freelancers and agencies only see and submit for the projects ticked here. {mail_note}</p>'
+            f'<select id="ik" name="kind">{kinds}</select><p></p><b>What they may promote</b><div>{boxes}</div>'
+            f'<p class="hint">Partners, freelancers and agencies only see and submit for the {word} chosen here. Managers get full '
+            f'builder access. {mail_note}</p>'
             f'<button class="btn" type="submit">Create invite</button></form>')
-    body = (ui.page_header("Team and Invites", "Invite people to your company and control which projects they can use.")
+    body = (ui.page_header("Team and Invites", f"Invite people to your company and control which {word} they can use.")
             + '<div class="stack">' + notice
             + ui.card("People", ui.table(["Name", "Email", "Role", "Joined", ""], mrows, "People"))
             + ui.card("Pending invites", ui.table(["Email", "Role", "Expires", ""], irows, "Pending invites")
@@ -3491,8 +3594,9 @@ async def team_invite(request: Request):
         return RedirectResponse("/", 303)
     f = await request.form()
     pids = [int(p) for p in f.getlist("project_id") if str(p).isdigit() and own_project(u, int(p))]
+    all_p = bool(f.get("all_projects"))
     try:
-        tok = ACC.create_invite(u["brand_id"], f.get("email", ""), f.get("kind", ""), pids, u["name"])
+        tok = ACC.create_invite(u["brand_id"], f.get("email", ""), f.get("kind", ""), pids, u["name"], all_projects=all_p)
     except ValueError as ex_:
         request.session["flash"] = str(ex_)
         return RedirectResponse("/admin/team", 303)

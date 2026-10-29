@@ -196,6 +196,22 @@ def pager(base, page, pages):
 
 # ------------------------------------------------------------------------ CSS
 CSS = """
+/* guided tour */
+.tour-ring{position:fixed;z-index:90;border-radius:10px;box-shadow:0 0 0 3px #f2a900,0 0 0 9999px rgba(10,20,40,.55);pointer-events:none;transition:all .2s}
+.tour-pop{position:fixed;z-index:91;width:min(340px,calc(100vw - 32px));background:var(--surface);color:var(--text);border-radius:10px;
+  box-shadow:0 12px 32px rgba(10,20,40,.3);padding:16px 18px}
+.tour-pop h3{font-size:16px;margin:0 0 6px}.tour-pop p{margin:0 0 12px;font-size:14.5px;color:var(--text-2)}
+.tour-pop .tour-row{display:flex;gap:8px;align-items:center}.tour-pop .tour-n{font-size:12.5px;color:var(--text-2);margin-right:auto}
+.tour-pop::before{content:"";position:absolute;left:-8px;top:18px;border:8px solid transparent;border-left:0;border-right-color:var(--surface)}
+.tour-pop.center::before{display:none}
+.tour-start{background:none;border:0;color:#c9d4ea;font:inherit;font-size:14px;cursor:pointer;display:flex;gap:8px;align-items:center;justify-content:flex-start;padding:8px 10px;width:100%;text-align:left}
+.tour-start:hover{color:#fff}
+input[type=checkbox],input[type=radio]{width:auto;min-height:0;margin:0 8px 0 0;vertical-align:middle;accent-color:var(--blue)}
+.checklist{list-style:none;margin:0;padding:0}.checklist li{display:flex;gap:12px;align-items:flex-start;padding:12px 0;border-bottom:1px solid var(--line-2)}
+.checklist li:last-child{border-bottom:0}.checklist .dot{flex:0 0 26px;height:26px;border-radius:50%;display:grid;place-items:center;font-size:13px;font-weight:700;
+  background:var(--blue-bg);color:var(--blue)}.checklist .done .dot{background:var(--ok-bg);color:var(--ok)}
+.checklist .done b{text-decoration:line-through;color:var(--text-2)}
+
 :root{
   --navy:#0f1f3d;--navy-2:#1a2f55;--blue:#1d5fd1;--blue-dk:#174bab;--blue-bg:#e8f0fd;
   --bg:#f5f7fa;--surface:#fff;--line:#dfe4ec;--line-2:#eceff4;
@@ -424,6 +440,54 @@ JS = """
   function nav(open){if(!side)return;side.classList.toggle('open',open);scrim.classList.toggle('on',open);mb.setAttribute('aria-expanded',open)}
   if(mb){mb.addEventListener('click',function(){nav(!side.classList.contains('open'))});scrim.addEventListener('click',function(){nav(false)});
     document.addEventListener('keydown',function(ev){if(ev.key==='Escape')nav(false)})}
+  // guided tour: points at each menu item and says what it is for (starts once for a new user, and from "Take the tour")
+  (function(){
+    var cfg=$('#tour-data');if(!cfg)return;
+    var steps=JSON.parse(cfg.textContent||'[]'),key='bg_tour_done_'+cfg.getAttribute('data-user'),i=0,ring,pop;
+    function store(){try{localStorage.setItem(key,'1')}catch(e){}}
+    function seen(){try{return localStorage.getItem(key)==='1'}catch(e){return true}}
+    function close(){if(ring)ring.remove();if(pop)pop.remove();ring=pop=null;store();document.removeEventListener('keydown',onKey)}
+    function onKey(ev){if(ev.key==='Escape')close();if(ev.key==='ArrowRight')go(i+1);if(ev.key==='ArrowLeft'&&i>0)go(i-1)}
+    function go(n){
+      if(n>=steps.length){close();return}
+      i=n;var s=steps[i],el=s.href?$('#side a[href="'+s.href+'"]'):null;
+      var small=window.matchMedia('(max-width:900px)').matches;
+      if(el&&small&&typeof nav==='function'&&!side.classList.contains('open')){nav(true);setTimeout(function(){go(n)},320);return}
+      if(!ring){ring=document.createElement('div');ring.className='tour-ring';document.body.appendChild(ring)}
+      if(!pop){pop=document.createElement('div');pop.className='tour-pop';pop.setAttribute('role','dialog');pop.setAttribute('aria-modal','true');
+        pop.setAttribute('aria-labelledby','tour-t');document.body.appendChild(pop);document.addEventListener('keydown',onKey)}
+      pop.innerHTML='<h3 id="tour-t"></h3><p></p><div class="tour-row"><span class="tour-n"></span>'
+        +(i>0?'<button type="button" class="btn secondary sm" data-t="back">Back</button>':'<button type="button" class="btn secondary sm" data-t="skip">Skip</button>')
+        +'<button type="button" class="btn sm" data-t="next">'+(i===steps.length-1?'Finish':'Next')+'</button></div>';
+      pop.querySelector('h3').textContent=s.title;pop.querySelector('p').textContent=s.text;
+      pop.querySelector('.tour-n').textContent=(i+1)+' of '+steps.length;
+      pop.querySelector('[data-t=next]').onclick=function(){go(i+1)};
+      var b=pop.querySelector('[data-t=back]');if(b)b.onclick=function(){go(i-1)};
+      var k=pop.querySelector('[data-t=skip]');if(k)k.onclick=close;
+      place(el);
+      if(small&&el)setTimeout(function(){if(pop)place(el)},380);   // the menu slides in on phones: measure again when it has stopped
+      pop.querySelector('[data-t=next]').focus();
+    }
+    function place(el){
+      if(el){
+        el.scrollIntoView({block:'nearest'});
+        var r=el.getBoundingClientRect();
+        ring.style.display='block';ring.style.left=(r.left-4)+'px';ring.style.top=(r.top-4)+'px';ring.style.width=(r.width+8)+'px';ring.style.height=(r.height+8)+'px';
+        pop.classList.remove('center');
+        var left=r.right+16,top=Math.max(12,Math.min(r.top-10,window.innerHeight-pop.offsetHeight-12));
+        if(left+pop.offsetWidth>window.innerWidth-8){
+          left=Math.max(8,(window.innerWidth-pop.offsetWidth)/2);pop.classList.add('center');
+          top=(r.bottom+12+pop.offsetHeight<window.innerHeight)?r.bottom+12:Math.max(8,r.top-pop.offsetHeight-12)}
+        pop.style.left=left+'px';pop.style.top=top+'px';
+      }else{
+        ring.style.display='none';pop.classList.add('center');
+        pop.style.left=Math.max(8,(window.innerWidth-pop.offsetWidth)/2)+'px';pop.style.top=Math.max(12,(window.innerHeight-pop.offsetHeight)/2)+'px';
+      }
+    }
+    $$('[data-tour-start]').forEach(function(b){b.addEventListener('click',function(){if(ring||pop)close();go(0)})});
+    if(cfg.getAttribute('data-auto')==='1'&&!seen())setTimeout(function(){go(0)},400);
+    window.addEventListener('resize',function(){if(pop)go(i)});
+  })();
   // dialogs (native <dialog>: focus trap + Esc handled by the browser)
   $$('[data-dialog]').forEach(function(b){b.addEventListener('click',function(){var d=document.getElementById(b.getAttribute('data-dialog'));if(d&&d.showModal)d.showModal()})});
   $$('[data-close]').forEach(function(b){b.addEventListener('click',function(){b.closest('dialog').close()})});
@@ -490,6 +554,34 @@ def landing(body):
 GENERAL_LABELS = {"facts": "Products and Facts", "access": "Product Access"}
 
 
+def tour_steps(is_admin, general):
+    """What each menu item is for, in the order the tour shows them."""
+    thing, things = ("product", "products") if general else ("project", "projects")
+    if is_admin:
+        return [
+            {"title": "Welcome to BrandGuard", "text": "A short tour of where everything is. It takes a minute. You can replay it any time from \"Take the tour\" at the bottom of the menu.", "href": ""},
+            {"title": "Overview", "text": "Your daily view: what waits for a decision, a setup checklist, and recent activity.", "href": "/"},
+            {"title": "Brand Rules", "text": "Banned phrases, confidential terms, wording and tone rules, industry starter packs, brand colours and your logo.", "href": "/admin/rules"},
+            {"title": ("Products" if general else "Projects") + " and Facts", "text": f"The approved prices and facts every claim is checked against. Add {things} by hand, import a spreadsheet or brochure, or load sample data.", "href": "/admin/projects"},
+            {"title": "Team and Invites", "text": "Invite channel partners, freelancers, agencies and managers. Each invite is a one-time link.", "href": "/admin/team"},
+            {"title": ("Product" if general else "Project") + " Access", "text": f"Choose which {things} each partner may promote. A partner can only submit for {things} they have access to.", "href": "/admin/access"},
+            {"title": "Review Queue", "text": "Content BrandGuard was not sure about, and disputes. You approve or reject here, with a reason.", "href": "/queue"},
+            {"title": "Disputes", "text": "When a creator disagrees with a rejection, you decide. Your decisions on wording become lessons.", "href": "/disputes"},
+            {"title": "Lessons", "text": "What BrandGuard learned from your dispute decisions. You can switch any lesson off. Prices are never learned.", "href": "/admin/learned"},
+            {"title": "Approval Records and Audit Trail", "text": "Every approval, rejection and rule change is recorded with who, when and why.", "href": "/approvals"},
+        ]
+    return [
+        {"title": "Welcome to BrandGuard", "text": "Check your content before it goes live. Here is where everything is. Replay this any time from \"Take the tour\" at the bottom of the menu.", "href": ""},
+        {"title": "My Dashboard", "text": "Your results at a glance: approved, rejected and waiting for a person.", "href": "/"},
+        {"title": "Submit Content", "text": f"Upload a video, poster, image or document, or paste a link. BrandGuard finds the {thing} and checks every claim.", "href": "/submit"},
+        {"title": "Bulk Upload", "text": "Send several files at once. They are reviewed one by one in the background, and you can leave the page.", "href": "/bulk"},
+        {"title": "My Submissions", "text": "Every result with its reasons: what was checked, what matched, and what to fix.", "href": "/reviews"},
+        {"title": "Disputes", "text": "If you think a rejection is wrong, dispute it with a note. A person at the company decides.", "href": "/disputes"},
+        {"title": "Verify a File", "text": "Check that a file is exactly the one that was approved, before you post it.", "href": "/verify"},
+        {"title": "Help and Guidelines", "text": "What each result means and what BrandGuard checks.", "href": "/help"},
+    ]
+
+
 def shell(title, body, user, role_label, active="", crumbs=None, queue_count=0,
           company=None, flash="", demo_users=(), general=False):
     """company = (current_id, [(id, name), ...]) for submitters; None otherwise.
@@ -531,12 +623,16 @@ def shell(title, body, user, role_label, active="", crumbs=None, queue_count=0,
             comp = f'<span class="chip info">{icon("building", 14)}{e(opts[0][1])}</span>'
 
     toast = f'<div hidden data-toast="{e(flash)}"></div>' if flash else ""
+    import json as _json
+    tour = (f'<script type="application/json" id="tour-data" data-user="{e(str(user["id"]))}" data-auto="1">'
+            + _json.dumps(tour_steps(is_admin, general)).replace("</", "<\\/") + '</script>')
     return (_HEAD + f"<title>{e(title)} - BrandGuard</title><style>{CSS}</style></head><body>"
             '<a class="skip" href="#main">Skip to content</a>'
             '<div class="shell">'
             f'<aside class="side" id="side"><a class="brand" href="/"><span class="logo">{_LOGO}</span>BrandGuard</a>'
             f'<nav aria-label="Main">{"".join(links)}</nav>'
             f'<div class="side-foot">{"<div class=lbl>Switch demo role</div>" + demo if demo else ""}'
+            f'<button type="button" class="tour-start" data-tour-start>{icon("help", 16)}Take the tour</button>'
             f'<a href="/logout">{icon("log-out", 16)}Log out</a></div></aside>'
             '<div class="scrim" id="scrim"></div>'
             '<div class="main-col"><header class="top">'
@@ -545,4 +641,4 @@ def shell(title, body, user, role_label, active="", crumbs=None, queue_count=0,
             f'<div class="who"><span class="name">{e(user["name"])}</span><span class="role">{e(role_label)}</span></div>'
             '</header>'
             f'<main id="main">{body}</main></div></div>'
-            f'<div id="toasts" role="status" aria-live="polite"></div>{toast}<script>{JS}</script></body></html>')
+            f'<div id="toasts" role="status" aria-live="polite"></div>{toast}{tour}<script>{JS}</script></body></html>')
