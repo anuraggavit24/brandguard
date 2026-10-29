@@ -41,6 +41,31 @@ check("everyday sentences are not flagged by any pack",
                   t) == [] for t in ["Welcome to our store, we are open daily", "Our team will call you back today",
                                      "The new model has a better camera and a longer battery", "Book a free site visit this weekend",
                                      "Fresh vegetables delivered to your door", "Apply online in five minutes"]))
+check("packs are large now (pattern families)", all(len(p["banned"]) >= 50 for p in packs.PACKS.values()), str({k: len(p["banned"]) for k, p in packs.PACKS.items()}))
+check("every pack names its sources", all(p["sources"] and all(len(x) == 2 and x[0] and x[1] for x in p["sources"]) for p in list(packs.PACKS.values()) + [packs.GENERAL]))
+check("family phrases are generated: assurance x outcome", "guaranteed placement" in packs.PACKS["education"]["banned"] and "guaranteed visa" in packs.PACKS["education"]["banned"])
+check("Hindi and Marathi family phrases are generated", "पक्का इलाज" in packs.PACKS["pharma"]["banned"] and "हमी परतावा" in packs.PACKS["finance"]["banned"])
+check("disease schedule is used (cure x disease)", "cures diabetes" in packs.PACKS["pharma"]["banned"] and "permanent cure for cancer" in packs.PACKS["pharma"]["banned"])
+check("insurance does not ban 'guaranteed returns' (guaranteed-benefit plans exist)", "guaranteed returns" not in packs.PACKS["insurance"]["banned"])
+check("conditional claims are advisory tone notes, not bans", "clinically proven" in packs.PACKS["beauty"]["tone"] and "clinically proven" not in packs.PACKS["beauty"]["banned"])
+CLEAN = ["Welcome to our store, we are open daily", "Our team will call you back today", "The new model has a better camera and a longer battery",
+         "Book a free site visit this weekend", "Fresh vegetables delivered to your door", "Apply online in five minutes",
+         "We offer a no sugar added range and no preservatives in this batch", "Fixed deposit with a fixed interest rate of 7 percent per annum",
+         "Your insurance policy has a free look period of 30 days", "Our doctors treat cancer patients every day at the hospital",
+         "Guaranteed delivery within three days or your money back", "100% satisfaction guarantee on all orders",
+         "The course covers placement preparation and interview practice", "Get a quote for your loan today, subject to approval",
+         "Join our admission counselling session on Saturday", "The 2 BHK flat has a RERA registration number shown below",
+         "Dermatologist consultations are available at our clinic", "Our platform encrypts data and has an uptime report page"]
+check("normal everyday and legitimate sentences pass every pack (no false positives)",
+      all(flagged({"banned_phrases": sum((p["banned"] for p in list(packs.PACKS.values()) + [packs.GENERAL]), [])}, t) == [] for t in CLEAN),
+      str([t for t in CLEAN if flagged({"banned_phrases": sum((p["banned"] for p in list(packs.PACKS.values()) + [packs.GENERAL]), [])}, t)]))
+check("real violations are caught in each industry",
+      all(flagged({"banned_phrases": packs.PACKS[k]["banned"]}, t) != [] for k, t in [
+          ("finance", "Invest today and get assured returns every month"), ("real_estate", "Booking now with guaranteed appreciation"),
+          ("insurance", "We offer 100% claim settlement"), ("pharma", "This oil cures diabetes in a week"),
+          ("food", "Our juice prevents cancer"), ("tech", "Our cloud is unhackable"), ("education", "Join us for guaranteed placement"),
+          ("ecommerce", "Lowest price guaranteed on every phone"), ("beauty", "Get instant fairness with this cream")]))
+check("Marathi family phrase is caught", flagged({"banned_phrases": packs.PACKS["finance"]["banned"]}, "यात हमी परतावा मिळेल") != [])
 check("every pack has a label and phrases", all(p["label"] and p["banned"] for p in packs.PACKS.values()))
 check("no pack lists a phrase twice", all(len(p["banned"]) == len({x.lower() for x in p["banned"]}) for p in packs.PACKS.values()))
 
@@ -52,9 +77,10 @@ with TestClient(main.app) as c:
     r = json.loads(brand["registry"])
     check("new company starts with the general and pharma rules", "no side effects" in r["banned_phrases"] and "miracle" in r["banned_phrases"])
     check("rules page shows them, editable", "no side effects" in c.get("/admin/rules").text and "Starter rules by industry" in c.get("/admin/rules").text)
+    check("rules page lists sources for each pack", "Drugs and Magic Remedies" in c.get("/admin/rules").text and "FSSAI" in c.get("/admin/rules").text)
     c.post("/admin/rules/pack", data={"pack": "food"})
     r2 = json.loads(main.q("SELECT registry FROM brands WHERE id=?", (brand["id"],))[0]["registry"])
-    check("adding another pack merges it", "boosts immunity" in r2["banned_phrases"] and "no side effects" in r2["banned_phrases"])
+    check("adding another pack merges it", "builds immunity" in r2["banned_phrases"] and "no side effects" in r2["banned_phrases"])
     before = len(r2["banned_phrases"])
     c.post("/admin/rules/pack", data={"pack": "food"})
     r3 = json.loads(main.q("SELECT registry FROM brands WHERE id=?", (brand["id"],))[0]["registry"])

@@ -1832,14 +1832,23 @@ def rules_page(request: Request, err: str = ""):
 
 
 def pack_card():
-    btns = "".join(
-        f'<form method="post" action="/admin/rules/pack" style="display:inline-block;margin:0 8px 8px 0" data-lock>'
-        f'<input type="hidden" name="pack" value="{k}"><button class="btn secondary sm" type="submit">{e(lbl)}</button></form>'
-        for k, lbl in packs.OPTIONS if k)
+    rows = ""
+    for k, lbl in packs.OPTIONS:
+        if not k:
+            continue
+        p, n = packs.PACKS[k], packs.counts(k)
+        src = "".join(f"<li><b>{e(t)}</b><br><span class='muted'>{e(d)}</span></li>" for t, d in p.get("sources", []))
+        rows += (f'<details style="margin:0 0 10px"><summary><b>{e(lbl)}</b> '
+                 f'<span class="muted">({n["banned"]} banned phrases, {n["terminology"]} terms, {n["tone"]} tone notes)</span></summary>'
+                 f'<div style="padding:8px 0 0 14px"><p class="muted" style="margin:0 0 6px">Based on:</p><ul>{src}</ul>'
+                 f'<form method="post" action="/admin/rules/pack" data-lock>'
+                 f'<input type="hidden" name="pack" value="{k}"><button class="btn secondary sm" type="submit">Add {e(lbl)} rules</button></form>'
+                 f'</div></details>')
     return ui.card("Starter rules by industry",
                    f'<p class="muted">Add a ready list of commonly challenged claims for your industry. Phrases already in your '
-                   f'rules are skipped, and every phrase can be edited or removed below. These lists are a starting point, '
-                   f'not legal advice. Review them for your products.</p><div>{btns}</div>')
+                   f'rules are skipped, and every phrase can be edited or removed below. Open an industry to see which public '
+                   f'rules the list is based on. These lists are a starting point, not legal advice: some phrases may be '
+                   f'allowed for your product, so review them and remove what does not apply.</p>{rows}')
 
 
 @app.post("/admin/rules/pack")
