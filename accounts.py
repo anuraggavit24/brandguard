@@ -145,12 +145,15 @@ def email_taken(email):
     return bool(_rows("SELECT 1 FROM users WHERE lower(email)=?", (email.lower(),)))
 
 
-def _new_registry(company):
-    return {"brand": company, "banned_phrases": [], "confidential": [], "allowed_contacts": [],
-            "glossary": [company, "RERA", "BHK", "possession", "crore", "lakh", "कोटी", "लाख"]}
+def _new_registry(company, industry=""):
+    import packs
+    reg = {"brand": company, "banned_phrases": [], "confidential": [], "allowed_contacts": [],
+           "glossary": [company, "RERA", "BHK", "possession", "crore", "lakh", "कोटी", "लाख"]}
+    packs.apply(reg, [industry] if industry else [])
+    return reg
 
 
-def create_company(company, owner_name, email, password):
+def create_company(company, owner_name, email, password, industry=""):
     """Create a company and its first builder. Returns (user_id, brand_id) or raises ValueError with a clear message."""
     company, owner_name, email = (company or "").strip(), (owner_name or "").strip(), clean_email(email)
     if not (2 <= len(company) <= 80):
@@ -167,7 +170,7 @@ def create_company(company, owner_name, email, password):
     con = _con()
     try:
         bid = con.execute("INSERT INTO brands (name, registry) VALUES (?,?)",
-                          (company, json.dumps(_new_registry(company), ensure_ascii=False))).lastrowid
+                          (company, json.dumps(_new_registry(company, industry), ensure_ascii=False))).lastrowid
         uid = con.execute("INSERT INTO users (name, email, role, brand_id, pw_hash, created_at) VALUES (?,?,?,?,?,?)",
                           (owner_name, email, "admin", bid, hash_password(password), _now())).lastrowid
         con.commit()

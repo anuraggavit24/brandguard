@@ -256,7 +256,7 @@ def review(segments, reg, threshold=0.65, check_prices=True):
 
         # 3) banned phrases
         for w in banned:
-            if w in low:
+            if _has_phrase(low, w):
                 add("FLAG", "HIGH", "BANNED_PHRASE", t, w,
                     f'"{w}" is on the banned-claims list.',
                     "Remove or rephrase this claim.", conf)

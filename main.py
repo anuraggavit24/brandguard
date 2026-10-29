@@ -25,6 +25,7 @@ import accounts as ACC
 import jobs as JOBS
 import learning as LRN
 import mailer
+import packs
 import rewrite as RW
 import ocr as OCR
 import realestate as RE
@@ -1107,7 +1108,7 @@ ACTION_LABEL = {
     "LESSON_LEARNED": "Lesson written from dispute", "LESSON_APPLIED": "Earlier decision applied",
     "LESSON_CHANGED": "Lesson changed", "COMPANY_CREATED": "Company created", "INVITE_CREATED": "Invite created",
     "INVITE_ACCEPTED": "Invite accepted", "INVITE_CANCELLED": "Invite cancelled", "MEMBER_REMOVED": "Member removed",
-    "REWRITE_SUGGESTED": "Wording suggestion created", "BATCH_STARTED": "Bulk batch queued", "BATCH_DONE": "Bulk batch finished",
+    "REWRITE_SUGGESTED": "Wording suggestion created", "PACK_APPLIED": "Industry rules added", "BATCH_STARTED": "Bulk batch queued", "BATCH_DONE": "Bulk batch finished",
 }
 DECISION_TEXT = {
     "AUTO_APPROVED": ("ok", "check-circle", "Every price matched the approved facts and nothing needed a person to check."),
@@ -1826,8 +1827,34 @@ def rules_page(request: Request, err: str = ""):
                            "Changes apply to new submissions only.",
                            f'<a class="btn" href="/admin/guide">{ui.icon("upload", 16)}Import from PDF</a>')
             + '<div class="stack">' + (ui.alert(e(err), "bad") if err else "") + ui.card("", search)
-            + "".join(cards) + "</div>" + "".join(dialogs))
+            + pack_card() + "".join(cards) + "</div>" + "".join(dialogs))
     return page("Brand Rules", body, u, "rules", [("Brand Rules", None)], request)
+
+
+def pack_card():
+    btns = "".join(
+        f'<form method="post" action="/admin/rules/pack" style="display:inline-block;margin:0 8px 8px 0" data-lock>'
+        f'<input type="hidden" name="pack" value="{k}"><button class="btn secondary sm" type="submit">{e(lbl)}</button></form>'
+        for k, lbl in packs.OPTIONS if k)
+    return ui.card("Starter rules by industry",
+                   f'<p class="muted">Add a ready list of commonly challenged claims for your industry. Phrases already in your '
+                   f'rules are skipped, and every phrase can be edited or removed below. These lists are a starting point, '
+                   f'not legal advice. Review them for your products.</p><div>{btns}</div>')
+
+
+@app.post("/admin/rules/pack")
+def rules_pack(request: Request, pack: str = Form("")):
+    u = admin_only(request)
+    if not u or pack not in packs.PACKS:
+        return RedirectResponse("/admin/rules", 303)
+    reg = load_reg(u)
+    added = packs.apply(reg, [pack])
+    save_reg(u, reg)
+    n = sum(added.values())
+    log(None, u["name"], "PACK_APPLIED", f"{packs.PACKS[pack]['label']}: {n} rule(s) added", u["brand_id"])
+    request.session["flash"] = (f"{packs.PACKS[pack]['label']}: {n} rule(s) added." if n
+                                else "All of those rules were already there.")
+    return RedirectResponse("/admin/rules", 303)
 
 
 def rule_field(field):
@@ -2486,11 +2513,15 @@ def start_session(request, user_id):
     request.session["uid"] = user_id
 
 
-def auth_form(title, intro, fields, action, button, error="", extra=""):
+def auth_form(title, intro, fields, action, button, error="", extra="", industry=None):
     inputs = "".join(
         f'<div><label for="f-{n}">{e(lbl)}</label><input id="f-{n}" name="{n}" type="{t}" value="{e(v)}" '
         f'{"required " if req else ""}autocomplete="{ac}"></div>' for n, lbl, t, v, req, ac in fields)
     alert = ui.alert(e(error), "bad", "Could not continue.") if error else ""
+    if industry is not None:
+        opts = "".join(f'<option value="{k}"{" selected" if k == industry else ""}>{e(lbl)}</option>' for k, lbl in packs.OPTIONS)
+        inputs += (f'<div><label for="f-industry">Your industry</label><select id="f-industry" name="industry">{opts}</select>'
+                   f'<p class="hint">You get a starter list of claims to avoid for this industry. You can edit it any time.</p></div>')
     return (f'<div style="max-width:460px;margin:0 auto"><h1>{e(title)}</h1><p class="page-desc">{intro}</p>{alert}'
             f'<form method="post" action="{action}" data-lock class="stack">{inputs}'
             f'<button class="btn" type="submit">{e(button)}</button></form>{extra}</div>')
@@ -2506,21 +2537,22 @@ def signup_form(request: Request):
          ("email", "Work email", "email", "", True, "email"),
          ("password", f"Password (at least {ACC.MIN_PASSWORD} characters)", "password", "", True, "new-password")],
         "/signup", "Create company",
-        extra='<p class="muted" style="margin-top:14px">Already have an account? <a href="/login">Sign in</a></p>'))
+        extra='<p class="muted" style="margin-top:14px">Already have an account? <a href="/login">Sign in</a></p>', industry=""))
 
 
 @app.post("/signup")
 def signup(request: Request, company: str = Form(""), name: str = Form(""), email: str = Form(""),
-           password: str = Form("")):
+           password: str = Form(""), industry: str = Form("")):
+    industry = industry if industry in packs.PACKS else ""
     try:
-        uid, bid = ACC.create_company(company, name, email, password)
+        uid, bid = ACC.create_company(company, name, email, password, industry)
     except ValueError as ex_:
         return page("Create company", auth_form(
             "Set up your company", "You become the builder for this company.",
             [("company", "Company name", "text", company, True, "organization"), ("name", "Your name", "text", name, True, "name"),
              ("email", "Work email", "email", email, True, "email"),
              ("password", f"Password (at least {ACC.MIN_PASSWORD} characters)", "password", "", True, "new-password")],
-            "/signup", "Create company", str(ex_)))
+            "/signup", "Create company", str(ex_), industry=industry))
     start_session(request, uid)
     log(None, name.strip(), "COMPANY_CREATED", f"Company created: {company.strip()}", bid)
     request.session["flash"] = "Company created. Add your first project, then invite your team."
