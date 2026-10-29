@@ -24,6 +24,7 @@ from starlette.middleware.sessions import SessionMiddleware
 import accounts as ACC
 import jobs as JOBS
 import learning as LRN
+import ai_review as AIR
 import mailer
 import packs
 import rewrite as RW
@@ -149,6 +150,7 @@ init_db()
 RE.setup(DB_PATH)
 RE.seed_if_empty()
 LRN.setup(DB_PATH)
+AIR.setup(DB_PATH)
 ACC.setup(DB_PATH)
 JOBS.setup(DB_PATH)
 
@@ -668,10 +670,11 @@ def apply_lessons(rep, brand_id):
 
 def finalize(rep):
     """Recount findings and set the verdict from the final list."""
-    fl = [f for f in rep["findings"] if f["status"] == "FLAG"]
-    su = [f for f in rep["findings"] if f["status"] == "SUPERVISION"]
+    live = [f for f in rep["findings"] if not f.get("dismissed")]
+    fl = [f for f in live if f["status"] == "FLAG"]
+    su = [f for f in live if f["status"] == "SUPERVISION"]
     rep["flags"], rep["supervision"] = len(fl), len(su)
-    if any(f["severity"] == "CRITICAL" for f in rep["findings"]):
+    if any(f["severity"] == "CRITICAL" for f in live):
         rep["verdict"] = "BLOCKED - confidential data"
     elif fl:
         rep["verdict"] = "REJECT - fix and resubmit"
@@ -876,7 +879,12 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
                 "SUPERVISION", "MEDIUM", "SPEECH_UNCLEAR", 0, f"{round(avg * 100)}% average recognition",
                 "The speech was hard to recognise (noise, accent or low volume), so the transcript may contain mistakes.",
                 "A person should listen to the video before it is approved.", avg))
-    # repeated advice is shown once
+    finish_report(rep)
+    return rep
+
+
+def finish_report(rep):
+    """Show repeated advice once, number the findings, set the verdict. Safe to call again after adding findings."""
     seen_notes, kept = set(), []
     for f in rep["findings"]:
         if f["status"] == "NOTE":
@@ -891,6 +899,26 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
     finalize(rep)
     if rep["needs_confirmation"] and not any(f["severity"] == "CRITICAL" for f in rep["findings"]):
         rep["verdict"] = "CONFIRM - project needs confirming"
+
+
+def add_ai_review(rep, brand_id, reg):
+    """Run the AI reviewer on the finished report. Never raises and never changes a verdict on its own:
+    paraphrase matches become 'needs a human check', everything else is advice."""
+    try:
+        units = AIR.units_from(rep.get("inputs", {}))
+        result, state = AIR.get_or_run(brand_id, units, reg)
+        rep["ai_review"] = {"state": state, "text": AIR.STATE_TEXT.get(state, ""),
+                            "summary": (result or {}).get("summary", ""),
+                            "tone_consistent": (result or {}).get("tone_consistent", True)}
+        for f in AIR.findings_for(result, brand_id, make_finding):
+            rep["findings"].append(f)
+        n = sum(1 for f in rep["findings"] if f.get("ai"))
+        rep["checks"].append(("AI review (paraphrase, tone, terminology, clarity)",
+                              "done" if state in ("fresh", "cached") else "not_available",
+                              AIR.STATE_TEXT.get(state, "") + (f" {n} point(s) raised." if n else "")))
+        finish_report(rep)
+    except Exception:
+        rep["ai_review"] = {"state": "error", "text": AIR.STATE_TEXT["error"], "summary": "", "tone_consistent": True}
     return rep
 
 
@@ -936,6 +964,7 @@ def review_submission(u, brand_id, path, sha, filename, language, source_url=Non
         segs = transcribe_file(path, language, glossary_for(reg, brand_id, u["id"]))
         screen = None if source_url else OCR.read_screen(path, MAX_SECONDS)
         rep = analyze(u, brand_id, segs, caption, reg, hint_pid, is_link=bool(source_url), screen=screen)
+        add_ai_review(rep, brand_id, reg)
     except Exception as ex_:
         msg = str(ex_) if isinstance(ex_, (ValueError, RuntimeError)) else "Something went wrong while reviewing this file."
         return None, msg
@@ -1000,6 +1029,7 @@ async def confirm_project(request: Request, sid: int):
         screen = {"lines": [{"start": l["start"], "end": l["end"], "text": l["text"], "raw": l.get("raw", l["text"]),
                              "conf": l["conf"]} for l in scr_old], **old["screen_meta"]}
     rep = analyze(u, s["brand_id"], segs, caption, reg, confirmed=ids, is_link=bool(s["source_url"]), screen=screen)
+    add_ai_review(rep, s["brand_id"], reg)
     if old.get("duplicate_of"):
         rep["duplicate_of"] = old["duplicate_of"]
     status = status_of(rep)
@@ -1076,6 +1106,9 @@ TYPE_LABEL = {
     "PROJECT_UNCERTAIN": "Could not link a claim to one project",
     "IDENTITY_WEAK": "Project not named in the content",
     "TERMINOLOGY": "Preferred wording", "TONE": "Tone of voice", "SPEECH_UNCLEAR": "Speech was hard to recognise",
+    "BANNED_PARAPHRASE": "Same meaning as a banned phrase (AI)", "AI_TONE": "Tone (AI review)",
+    "AI_TERMINOLOGY": "Terminology (AI review)", "AI_CLARITY": "Hard to follow (AI review)",
+    "AI_ADVICE": "Claim may need evidence (AI review)", "AI_LOWCONF": "Words that may be misheard (AI review)",
 }
 for _k in ("AREA", "BATHROOMS", "POSSESSION", "RERA", "OFFER", "DISTANCE", "BOOKING", "PRICE"):
     TYPE_LABEL[_k + "_UNVERIFIABLE"] = "No approved fact to compare with (not a confirmed error)"
@@ -1089,7 +1122,9 @@ SECTIONS = [
     ("Confidential information", lambda t: t == "CONFIDENTIAL_DATA"),
     ("Contact information", lambda t: t == "UNKNOWN_CONTACT"),
     ("Claims requiring evidence", lambda t: t == "UNSUPPORTED_CLAIM"),
-    ("Wording and tone suggestions", lambda t: t in ("TERMINOLOGY", "TONE")),
+    ("Different wording of a banned phrase (AI)", lambda t: t == "BANNED_PARAPHRASE"),
+    ("Wording and tone suggestions", lambda t: t in ("TERMINOLOGY", "TONE", "AI_TONE", "AI_TERMINOLOGY", "AI_CLARITY",
+                                                     "AI_ADVICE", "AI_LOWCONF")),
     ("Speech clarity", lambda t: t == "SPEECH_UNCLEAR"),
 ]
 SUGGESTABLE = ("BANNED_PHRASE", "UNSUPPORTED_CLAIM", "TERMINOLOGY", "TONE")
@@ -1108,7 +1143,7 @@ ACTION_LABEL = {
     "LESSON_LEARNED": "Lesson written from dispute", "LESSON_APPLIED": "Earlier decision applied",
     "LESSON_CHANGED": "Lesson changed", "COMPANY_CREATED": "Company created", "INVITE_CREATED": "Invite created",
     "INVITE_ACCEPTED": "Invite accepted", "INVITE_CANCELLED": "Invite cancelled", "MEMBER_REMOVED": "Member removed",
-    "REWRITE_SUGGESTED": "Wording suggestion created", "PACK_APPLIED": "Industry rules added", "BATCH_STARTED": "Bulk batch queued", "BATCH_DONE": "Bulk batch finished",
+    "REWRITE_SUGGESTED": "Wording suggestion created", "PACK_APPLIED": "Industry rules added", "AI_DISMISSED": "AI concern dismissed", "AI_BANNED": "AI concern added to banned phrases", "BATCH_STARTED": "Bulk batch queued", "BATCH_DONE": "Bulk batch finished",
 }
 DECISION_TEXT = {
     "AUTO_APPROVED": ("ok", "check-circle", "Every price matched the approved facts and nothing needed a person to check."),
@@ -1122,14 +1157,18 @@ DECISION_TEXT = {
 }
 
 
-def finding_html(f, sid=None, rep=None, can_suggest=False):
+def finding_html(f, sid=None, rep=None, can_suggest=False, can_decide=False):
     tone = {"FLAG": "bad", "SUPERVISION": "warn", "NOTE": "neutral"}.get(f["status"], "ok")
+    if f.get("dismissed"):
+        tone = "neutral"
     kind = f["type"]
     label = TYPE_LABEL.get(kind, kind.replace("_", " ").title())
     cap = f.get("source") == "caption"
     where = ("Post title or description" if cap else f'On screen at {fmt_time(f["time"])}' if f.get("source") == "screen"
              else f'Spoken at {fmt_time(f["time"])}')
     chip_txt = {"SUPERVISION": "Needs a human check", "NOTE": "Suggestion"}.get(f["status"], "Violation")
+    if f.get("dismissed"):
+        chip_txt = "Dismissed by a builder"
     status_chip = ui.badge(chip_txt, tone, {"warn": "alert", "neutral": "info"}.get(tone, "x-circle"))
     conf = ""
     if f.get("confidence") is not None and not cap:
@@ -1150,6 +1189,17 @@ def finding_html(f, sid=None, rep=None, can_suggest=False):
         elif can_suggest:
             sug = (f'<dt>Suggested wording</dt><dd><form method="post" action="/suggest/{sid}/{f["i"]}" style="display:inline">'
                    f'<button class="btn secondary sm" type="submit">Suggest compliant wording</button></form></dd>')
+    if f.get("ai"):
+        if f.get("alternative"):
+            sug += (f'<dt>Suggested wording</dt><dd><b>{e(f["alternative"])}</b>'
+                    f'<div class="muted">Written by the AI reviewer. Check it before using it.</div></dd>')
+        if can_decide and sid is not None and "i" in f and f["type"] == "BANNED_PARAPHRASE" and not f.get("dismissed") and not f.get("confirmed"):
+            sug += (f'<dt>Decision</dt><dd><form method="post" action="/ai/{sid}/{f["i"]}/ban" style="display:inline" data-lock>'
+                    f'<button class="btn sm" type="submit">Yes, same claim: add to banned phrases</button></form> '
+                    f'<form method="post" action="/ai/{sid}/{f["i"]}/dismiss" style="display:inline" data-lock>'
+                    f'<button class="btn secondary sm" type="submit">No, harmless: dismiss</button></form></dd>')
+        elif f.get("confirmed"):
+            sug += '<dt>Decision</dt><dd>Confirmed as the same claim and added to the banned phrases.</dd>'
     return (f'<div class="finding {tone}"><div class="finding-top">{status_chip}<b>{e(label)}</b>{conf}</div>'
             f'<dl><dt>Where</dt><dd>{e(where)}</dd>'
             f'<dt>Detected</dt><dd>{e(str(f["evidence"]))}</dd>'
@@ -1361,6 +1411,7 @@ def view_submission(request: Request, sid: int):
     parts, clean = [], []
     used = set()
     can_sug = (admin and s["brand_id"] == u["brand_id"]) or s["user_id"] == u["id"]
+    can_dec = admin and s["brand_id"] == u["brand_id"]
     claims = rep.get("claims", [])
     for title, test in SECTIONS:
         fs = [f for f in findings if test(f["type"])]
@@ -1377,14 +1428,14 @@ def view_submission(request: Request, sid: int):
                                  c["status"], ui.badge("Needs check", "warn", "alert"))])
             inner += ui.table(["Time", "Detected", "Compared with", "Approved", "Result"], crow, "Price claims")
             inner += '<p></p>'
-        inner += "".join(finding_html(f, sid, rep, can_sug) for f in fs)
+        inner += "".join(finding_html(f, sid, rep, can_sug, can_dec) for f in fs)
         if inner:
             parts.append(f'<h3 class="sec-title">{e(title)}</h3>{inner}')
         else:
             clean.append(title.lower())
     other = [f for f in findings if id(f) not in used]
     if other:
-        parts.append('<h3 class="sec-title">Other checks</h3>' + "".join(finding_html(f, sid, rep, can_sug) for f in other))
+        parts.append('<h3 class="sec-title">Other checks</h3>' + "".join(finding_html(f, sid, rep, can_sug, can_dec) for f in other))
     if not findings and not claims:
         parts.append(ui.empty("No issues found", "Nothing in this video broke a rule."))
     if clean and (findings or claims):
@@ -1394,6 +1445,14 @@ def view_submission(request: Request, sid: int):
         parts.append('<h3 class="sec-title">Link metadata</h3><p class="muted">'
                      + (f'{len(cf)} finding(s) came from the post title or description (marked above).' if cf
                         else "The post title and description were checked and had no findings.") + "</p>")
+    air = rep.get("ai_review") or {}
+    ai_card = ""
+    if air:
+        body_ = f'<p class="muted">{e(air.get("text", ""))}</p>'
+        if air.get("summary"):
+            body_ = (f'<p><b>What was said:</b> {e(air["summary"])}</p>'
+                     + ('' if air.get("tone_consistent", True) else '<p>The tone changes during the video.</p>') + body_)
+        ai_card = ui.card("AI review", body_, "Advice only. The AI never approves or rejects. Rules and people decide.")
     findings_card = ui.card("Compliance findings", "".join(parts))
     new_claims = [c for c in claims if "verdict" in c]
     claims_card = (ui.card("Claim-by-claim checks", claims_table(new_claims),
@@ -1434,7 +1493,7 @@ def view_submission(request: Request, sid: int):
     crumbs = [("Review Queue" if admin else "My Submissions", "/queue" if admin else "/reviews"), (f"Submission #{sid}", None)]
     body = (ui.page_header(f"Submission #{sid}", e(s["filename"] or ""), '<a class="btn secondary" href="/reviews">Back to list</a>')
             + '<div class="stack">' + summary + notes + confirm + actions + '<div class="cols"><div class="stack">' + details + extra + transcript
-            + '</div><div class="stack">' + claims_card + findings_card + audit + '</div></div></div>' + dialogs)
+            + '</div><div class="stack">' + claims_card + ai_card + findings_card + audit + '</div></div></div>' + dialogs)
     return page(f"Submission {sid}", body, u, "queue" if admin and s["status"] in QUEUE_STATUSES else "reviews", crumbs, request)
 
 
@@ -2880,6 +2939,56 @@ def bulk_view(request: Request, batch_id: int):
             + ui.card("Videos", ui.table(["File", "Progress", "Result"], rows, "Batch videos"))
             + f'<p><a class="btn secondary" href="/bulk">Back to bulk upload</a></p></div>')
     return page(f"Batch #{batch_id}", body, u, "bulk", [("Bulk Upload", "/bulk"), (f"Batch #{batch_id}", None)], request)
+
+
+# ============================================================ AI review decisions
+def _ai_target(request, sid, i):
+    u, s = admin_only(request), None
+    s = get_sub(sid) if u else None
+    if not (u and s and s["brand_id"] == u["brand_id"]):
+        return None, None, None, None
+    rep = rep_of(s)
+    fs = rep.get("findings", [])
+    if not (0 <= i < len(fs)) or not fs[i].get("ai") or fs[i]["type"] != "BANNED_PARAPHRASE":
+        return u, s, rep, None
+    return u, s, rep, fs[i]
+
+
+def _save_after_ai_decision(s, rep):
+    finalize(rep)
+    if rep.get("needs_confirmation") and not rep["verdict"].startswith("BLOCKED"):
+        rep["verdict"] = "CONFIRM - project needs confirming"
+    ex("UPDATE submissions SET report=?, verdict=? WHERE id=?", (json.dumps(rep, ensure_ascii=False), rep["verdict"], s["id"]))
+
+
+@app.post("/ai/{sid}/{i}/dismiss")
+def ai_dismiss(request: Request, sid: int, i: int):
+    u, s, rep, f = _ai_target(request, sid, i)
+    if not f:
+        return RedirectResponse(f"/s/{sid}" if u else "/", 303)
+    f["dismissed"] = True
+    AIR.dismiss(s["brand_id"], f["evidence"])
+    _save_after_ai_decision(s, rep)          # status is left for the builder to decide: a dismissal never auto-approves
+    log(sid, u["name"], "AI_DISMISSED", f'"{f["evidence"]}" judged harmless', s["brand_id"])
+    request.session["flash"] = "Dismissed. This company will not be shown that wording again."
+    return RedirectResponse(f"/s/{sid}", 303)
+
+
+@app.post("/ai/{sid}/{i}/ban")
+def ai_ban(request: Request, sid: int, i: int):
+    u, s, rep, f = _ai_target(request, sid, i)
+    if not f:
+        return RedirectResponse(f"/s/{sid}" if u else "/", 303)
+    reg = load_reg(u)
+    phrase = norm(str(f["evidence"]))[:120]
+    if phrase and phrase.lower() not in {x.lower() for x in reg.get("banned_phrases", [])}:
+        reg.setdefault("banned_phrases", []).append(phrase)
+        save_reg(u, reg)
+    f["confirmed"] = True
+    _save_after_ai_decision(s, rep)
+    log(sid, u["name"], "AI_BANNED", f'"{phrase}" added to banned phrases (resembles "{f.get("matches", "")}")', s["brand_id"])
+    request.session["flash"] = "Added to your banned phrases. Future videos using these words are flagged automatically."
+    return RedirectResponse(f"/s/{sid}", 303)
 
 
 # ============================================================ suggested wording
