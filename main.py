@@ -36,6 +36,7 @@ import ratelimit as RL
 import threading
 import packs
 import rewrite as RW
+import governance as GOV
 import ocr as OCR
 import realestate as RE
 import ui
@@ -82,6 +83,25 @@ def _secret_key():
 
 
 app.add_middleware(SessionMiddleware, secret_key=_secret_key(), max_age=3 * 86400, same_site="lax")
+
+
+@app.exception_handler(OverflowError)
+async def _too_big(request, exc):
+    """An id far too large for the database (someone typing in the address bar) is simply 'not found'."""
+    return HTMLResponse(ui.landing('<div style="max-width:520px;margin:40px auto"><h1>Not found</h1>'
+                                   '<p class="page-desc">That page does not exist.</p><p><a class="btn" href="/">Go to the start</a></p></div>'),
+                        status_code=404)
+
+
+@app.exception_handler(Exception)
+async def _unexpected(request, exc):
+    """Last safety net: a readable page instead of a bare server error. The details go to the server log."""
+    import traceback
+    traceback.print_exception(type(exc), exc, exc.__traceback__)
+    return HTMLResponse(ui.landing('<div style="max-width:520px;margin:40px auto"><h1>Something went wrong</h1>'
+                                   '<p class="page-desc">This action could not be completed. Nothing was changed. Go back and try '
+                                   'again; if it keeps happening, tell the company that invited you.</p>'
+                                   '<p><a class="btn" href="/">Go to the start</a></p></div>'), status_code=500)
 
 e = html.escape
 
@@ -166,9 +186,32 @@ def init_db():
     import packs as _packs
     for bid, bname in con.execute("SELECT id, name FROM brands WHERE id IN (1, 2)").fetchall():
         reg_ = json.loads(con.execute("SELECT registry FROM brands WHERE id=?", (bid,)).fetchone()[0] or "{}")
+        changed = False
         if bname in ("Demo Developer", "Sample Builders") and reg_.get("packs_seeded") != 2:
             _packs.apply(reg_, ["real_estate"])
             reg_["packs_seeded"] = 2
+            changed = True
+        # Seed visual + a11y defaults once so paste demos light up Risk Radar spokes without manual setup.
+        if bname == "Demo Developer" and reg_.get("assets_seeded") != 1:
+            base = AST.config(reg_)
+            base.update({
+                "palette": base.get("palette") or ["#1F3A5F", "#F2A900"],
+                "palette_names": base.get("palette_names") or ["navy", "gold", "blue", "yellow"],
+                "check_palette": True if base.get("palette") else base.get("check_palette", False),
+                "check_color_words": True,
+                "check_text_a11y": True,
+                "fonts": base.get("fonts") or ["Montserrat", "Open Sans"],
+                "visual_donts": base.get("visual_donts") or ["comic sans", "neon pink"],
+                "visual_dos": base.get("visual_dos") or ["navy headlines", "generous whitespace"],
+                "logo_name": base.get("logo_name") or "Demo Developer",
+                "require_logo_mention": False,
+                "require_alt_text": True,
+                "wall_text_chars": int(base.get("wall_text_chars") or 600),
+            })
+            reg_["assets"] = base
+            reg_["assets_seeded"] = 1
+            changed = True
+        if changed:
             con.execute("UPDATE brands SET registry=? WHERE id=?", (json.dumps(reg_, ensure_ascii=False), bid))
     con.commit()
     con.close()
@@ -374,11 +417,18 @@ def home(request: Request):
         def role(key, ic, title, text, btn):
             return (f'<div class="card role-card"><span class="ic-lg">{ui.icon(ic, 22)}</span><h2>{title}</h2>'
                     f'<p class="muted">{text}</p><a class="btn" href="/enter/{key}">{btn}{ui.icon("arrow-right", 16)}</a></div>')
+        pills = (
+            f'<div class="feature-pills">'
+            f'<span>{ui.icon("radar", 14)} Brand Risk Radar</span>'
+            f'<span>{ui.icon("wand", 14)} Intent-preserving rewrites</span>'
+            f'<span>{ui.icon("git-branch", 14)} Claim → fact provenance</span>'
+            f'<span>{ui.icon("activity", 14)} Guideline Health</span>'
+            f'<span>{ui.icon("shield", 14)} Human-in-the-loop</span></div>')
         body = f"""
-        <div style="margin-bottom:28px"><h1>Review videos before they go live</h1>
-        <p class="page-desc">BrandGuard listens to a marketing video in Marathi, Hindi or English, checks every price
-        and claim against the brand's approved facts, and sends anything uncertain to a person. Nothing is approved
-        without a recorded decision.</p></div>
+        <div class="land-hero"><h1>Brand governance before publish</h1>
+        <p class="page-desc">BrandGuard reviews marketing content against your guidelines, facts and assets —
+        explains every issue, suggests compliant fixes that keep the creator's intent, and routes uncertainty to a person.
+        Nothing ships on a silent guess.</p>{pills}</div>
         <div class="cols-2" style="margin-bottom:28px">
           <div class="card role-card"><span class="ic-lg">{ui.icon("building", 22)}</span><h2>Set up your company</h2>
             <p class="muted">Create a company account, add your brand rules and projects, then invite channel partners, freelancers and agencies.</p>
@@ -390,15 +440,15 @@ def home(request: Request):
         <p class="sec-title">Or try the demo with a ready-made role</p>
         <div class="cols-3">
           {role("admin", "shield", "Builder / Brand Manager",
-                "Set brand rules and approved facts, review flagged and disputed items, then approve or reject.",
+                "Rules, facts, Risk Radar insights, Guideline Health, queue decisions.",
                 "Enter as Builder")}
           {role("partner", "upload", "Channel Partner",
-                "Submit a video or paste a link for one company and see the result.", "Enter as Partner")}
-          {role("freelancer", "building", "Freelancer",
+                "Paste copy or upload — see Risk Radar, claim provenance and fix suggestions.", "Enter as Partner")}
+          {role("freelancer", "pen", "Freelancer",
                 "Works with two companies under one login and switches between them.", "Enter as Freelancer")}
         </div>
-        <p style="margin-top:20px"><a class="btn secondary" href="/test-audio">Judges: demo files to download</a></p>
-        <p class="muted" style="margin-top:12px">The demo roles are shared sample accounts with fictional data. Real accounts are separate.</p>"""
+        <p style="margin-top:20px"><a class="btn secondary" href="/test-audio">{ui.icon("play", 16)}Judges: demo files</a></p>
+        <p class="muted" style="margin-top:12px">Demo roles are shared sample accounts with fictional data. Real accounts are separate.</p>"""
         return page("Welcome", body)
     return admin_dash(request, u) if u["role"] == "admin" else submitter_dash(request, u)
 
@@ -505,6 +555,10 @@ def submit_form(request: Request):
       <div class="picked" id="picked">{ui.icon("file", 18)}<b id="picked-name"></b><span class="sp"></span>
         <button type="button" class="btn secondary sm" id="remove-file">Remove</button></div>
       <p class="req" id="file-err" role="alert" hidden></p>
+      <label for="alt_text">Image description / alt text <span class="muted">(optional — used for posters &amp; images)</span></label>
+      <input id="alt_text" type="text" name="alt_text" maxlength="500"
+             placeholder="e.g. Demo Heights 2 BHK offer poster with price and RERA">
+      <p class="hint">If Brand Rules require alt text, leave this blank on an image and BrandGuard will flag it for accessibility.</p>
       {company}{lang}
       <p data-busy hidden class="muted" role="status">Reviewing. On this free server it can take a few minutes. Please keep this page open.</p>
       <button id="submit-file" class="btn" type="submit" data-busy-label="Reviewing...">Submit for Compliance Review</button>
@@ -536,25 +590,39 @@ def submit_form(request: Request):
       <button class="btn" type="submit" data-busy-label="Reading...">Check this page</button>
     </form>"""
     link_form = link_form + page_form
+    text_form = f"""
+    <form method="post" action="/upload_text" data-lock>
+      <label for="copy-title">Title <span class="muted">(optional)</span></label>
+      <input id="copy-title" type="text" name="title" maxlength="80" placeholder="Instagram caption / email subject">
+      <label for="copy-text">Marketing copy</label>
+      <textarea id="copy-text" name="text" rows="8" required maxlength="20000"
+        placeholder="Paste a caption, ad, email or script. Example: Book Demo Heights 2 BHK at 1 crore with guaranteed returns."></textarea>
+      <p class="hint">Checked like a document: banned phrases, confidential terms, prices, tone and preferred wording.
+      No speech key needed — ideal for a quick demo.</p>
+      {company}
+      <button class="btn" type="submit" data-busy-label="Reviewing...">Check this copy</button>
+    </form>"""
     body = (ui.page_header("Submit Content for Review",
-                           "BrandGuard listens to the video, checks every price and claim against the brand's approved facts "
-                           "and shows you the result. Anything uncertain goes to a person for a decision.")
-            + ui.alert("This demo runs on a free Render server with very little CPU and memory. To review a video, BrandGuard turns the speech into text and then reads every frame of the video, so it can take a few minutes. The first request after a quiet period is slower still, because the server has to wake up. Please keep this page open until the result appears. On a normal server the same review takes seconds. Short videos (under 15 seconds) are quickest.", "warn", "Please be patient: free server.")
+                           "BrandGuard checks videos, posters, documents, pages and pasted copy against the brand's approved "
+                           "facts and rules. Anything uncertain goes to a person for a decision.")
+            + ui.alert("This demo runs on a free Render server with very little CPU and memory. To review a video, BrandGuard turns the speech into text and then reads every frame of the video, so it can take a few minutes. The first request after a quiet period is slower still, because the server has to wake up. Please keep this page open until the result appears. On a normal server the same review takes seconds. Short videos (under 15 seconds) are quickest. For a fast path, use <b>Paste copy</b>.", "warn", "Please be patient: free server.")
             + '<div class="cols"><div>'
             + ui.card("", f"""
               <div class="method" role="tablist" aria-label="Submission method">
-                <button type="button" class="btn" role="tab" id="tab-file" aria-selected="true" aria-controls="panel-file">{ui.icon("upload", 16)}Upload a file</button>
+                <button type="button" class="btn" role="tab" id="tab-file" aria-selected="true" aria-controls="panel-file">{ui.icon("video", 16)}Upload file</button>
+                <button type="button" class="btn" role="tab" id="tab-text" aria-selected="false" aria-controls="panel-text">{ui.icon("clipboard", 16)}Paste copy</button>
                 <button type="button" class="btn" role="tab" id="tab-link" aria-selected="false" aria-controls="panel-link">{ui.icon("link", 16)}Paste a link</button></div>
               <div id="panel-file" role="tabpanel" aria-labelledby="tab-file">{file_form}</div>
+              <div id="panel-text" role="tabpanel" aria-labelledby="tab-text" hidden>{text_form}</div>
               <div id="panel-link" role="tabpanel" aria-labelledby="tab-link" hidden>{link_form}</div>""")
             + '</div><div>'
-            + ui.card("What happens next", """<ol class="muted" style="padding-left:20px;margin:0">
-              <li>The speech is transcribed and the on-screen text is read, then both are checked. On the free demo server this can take a few minutes.</li>
-              <li>You see one of: auto-approved, rejected, or sent to a person.</li>
-              <li>If rejected, fix the video and resubmit, or dispute the finding.</li>
-              <li>Nothing is approved just because it uploaded.</li></ol>""")
+            + ui.card("What happens next", f"""<ol class="muted" style="padding-left:20px;margin:0">
+              <li>{ui.icon("radar", 14)} <b>Brand Risk Radar</b> summarises the findings across claims, tone, facts, visual, accessibility and confidentiality.</li>
+              <li>{ui.icon("git-branch", 14)} <b>Claim provenance</b> maps each claim to an approved fact.</li>
+              <li>{ui.icon("wand", 14)} <b>Suggested wording</b> shows a compliant way to say it, where one can be made safely.</li>
+              <li>{ui.icon("shield", 14)} Uncertain items go to a person — nothing is approved just because it uploaded.</li></ol>""")
             + '</div></div>')
-    return page("Submit a Video", body, u, "submit", [("Submit a Video", None)], request)
+    return page("Submit Content", body, u, "submit", [("Submit Content", None)], request)
 
 
 @app.get("/help", response_class=HTMLResponse)
@@ -579,7 +647,8 @@ def help_page(request: Request):
               <li>Comparative or urgency claims that need evidence, such as "lowest price" or "limited units".</li>
               <li>For linked posts, the title and description as well as the audio.</li>
               <li>Posters, banners and images (text read from the image), documents (PDF, Word, text) and blog pages.</li>
-              <li>For images: text contrast, text size, brand colours and the brand logo, when the company has set them.</li>
+              <li>Visual consistency: logo/palette on images; colour words, logo name, fonts and visual don’ts in paste/docs/OCR.</li>
+              <li>Accessibility: contrast and text size on images; ALL CAPS, wall-of-text, colour-only cues, weak CTAs and alt text on copy.</li>
               <li>The company's own product facts, such as discounts, warranties, fees, rates and dates.</li></ul>""")
             + ui.card("What each status means", ui.table(["Status", "Meaning"], legend, "Status meanings"))
             + ui.card("Not available", """<p class="muted" style="margin:0">Checking a RERA number against the official
@@ -832,7 +901,9 @@ def confidential_figures(text, confidential):
                 continue
             near = toks[max(0, i - 4):i + 5]
             if any(re.fullmatch(r"\d+(?:[.,]\d+)?%?", w) for w in near) or "%" in text:
-                out.append((ph, " ".join(near)))
+                words = text.split()
+                pos = min(range(len(words)), key=lambda k: 0 if phon.skel(re.sub(r"\W", "", words[k].lower())) == hs else 1) if words else 0
+                out.append((ph, " ".join(words[max(0, pos - 4):pos + 5]) or " ".join(near)))
                 break
     return out
 
@@ -934,7 +1005,9 @@ def analyze(u, brand_id, segs, caption, reg, hint_pid=None, confirmed=None, is_l
     rep["policy"] = RE.POLICY_VERSION
     rep["kind"] = kind
     rep["claims"], rep["facts_used"] = [], []
-    rep["needs_confirmation"] = state in ("LIKELY", "AMBIGUOUS", "NOT_FOUND", "CONFLICT") and bool(segs or caption.strip())
+    # Screen/document/image text must also trigger confirmation — otherwise posters and paste-copy never ask.
+    rep["needs_confirmation"] = (state in ("LIKELY", "AMBIGUOUS", "NOT_FOUND", "CONFLICT")
+                                 and bool(segs or caption.strip() or screen_lines))
     rep["candidates"] = [p["id"] for p in authorised] if state in ("NOT_FOUND",) else list(idres["project_ids"])
 
     checks = [("Project identification", "done" if not rep["needs_confirmation"] else "pending",
@@ -1071,8 +1144,44 @@ def finish_report(rep):
     for i_, f in enumerate(rep["findings"]):
         f["i"] = i_
     finalize(rep)
-    if rep["needs_confirmation"] and not any(f["severity"] == "CRITICAL" for f in rep["findings"]):
+    # Confirm project only when there is no confirmed violation yet — bans/wrong prices still reject first.
+    if (rep["needs_confirmation"]
+            and not any(f["severity"] == "CRITICAL" or f["status"] == "FLAG" for f in rep["findings"])):
         rep["verdict"] = "CONFIRM - project needs confirming"
+
+
+def llm_ready():
+    return bool(os.environ.get("GROQ_API_KEY"))
+
+
+def attach_default_suggestions(rep, reg):
+    """Pre-fill terminology replacements (and offline rewrites for banned/unsupported wording) so creators see a fix without an extra click."""
+    sugg = rep.setdefault("suggestions", {})
+    for f in rep.get("findings", []):
+        i = f.get("i")
+        if i is None or str(i) in sugg or f.get("type") not in ("BANNED_PHRASE", "UNSUPPORTED_CLAIM", "TERMINOLOGY", "TONE"):
+            continue
+        sentence = LRN._sentence_for(rep, f) or str(f.get("evidence") or "")
+        if f["type"] == "TERMINOLOGY":
+            prefer = ""
+            for rule in reg.get("terminology", []):
+                a_, _, b_ = norm(rule).partition("=>")
+                if a_.strip().lower() == str(f["evidence"]).lower():
+                    prefer = b_.strip()
+            text = RW.replace_term(sentence, str(f["evidence"]), prefer)
+            sugg[str(i)] = {"sentence": sentence, "rewrite": text, "by": "rule",
+                            "error": None if text else "No preferred wording is set for this term."}
+        elif f["type"] in ("BANNED_PHRASE", "UNSUPPORTED_CLAIM", "TONE"):
+            text, _err = RW.demo_rewrite(sentence, str(f["evidence"]), f.get("explanation", ""), reg)
+            low_t = norm(text or "").lower()
+            still_risky = text and (any(w in low_t for w in UNSUPPORTED) or
+                                    any(t_.strip() and t_.strip().lower() in low_t for t_ in reg.get("avoid_tone", [])))
+            if text and not still_risky:   # only a clean sentence with nothing else flagged in it is offered
+                sugg[str(i)] = {"sentence": sentence, "rewrite": text, "by": "rule", "error": None}
+    RW.attach_counterfactuals(rep, reg)
+    # Persist explainable Brand Risk Radar on the report for the review UI.
+    risk = GOV.compute_risk(rep)
+    rep["brand_risk"] = risk
 
 
 def add_ai_review(rep, brand_id, reg):
@@ -1102,10 +1211,10 @@ def status_of(rep):
     """Turn a finished report into a status. Approval needs certain identity, a verified claim and no open issue."""
     if rep["verdict"].startswith("BLOCKED"):
         return "BLOCKED"
-    if rep.get("needs_confirmation"):
-        return "NEEDS_CONFIRMATION"
     if rep["flags"]:
         return "REJECTED"
+    if rep.get("needs_confirmation"):
+        return "NEEDS_CONFIRMATION"
     if rep["supervision"]:
         return "SUPERVISION"
     ident = rep.get("identity", {}).get("state")
@@ -1127,11 +1236,13 @@ def store_projects(sid, rep, actor):
             actor if rep.get("identity", {}).get("state") == "CONFIRMED" else None))
 
 
-def review_submission(u, brand_id, path, sha, filename, language, source_url=None, caption="", hint_pid=None, notify=True):
+def review_submission(u, brand_id, path, sha, filename, language, source_url=None, caption="", hint_pid=None,
+                      notify=True, alt_text=""):
     """Review one file, then delete the uploaded copy. Only the report, transcript and file hash are kept, so the
     file can still be verified later by its hash, and uploads do not fill the disk."""
     try:
-        sid, msg = _review_submission(u, brand_id, path, sha, filename, language, source_url, caption, hint_pid)
+        sid, msg = _review_submission(u, brand_id, path, sha, filename, language, source_url, caption, hint_pid,
+                                     alt_text=alt_text)
         if sid and notify:
             notify_result(sid)
         return sid, msg
@@ -1169,7 +1280,8 @@ def sweep_uploads(max_age_hours=24):
     return n
 
 
-def _review_submission(u, brand_id, path, sha, filename, language, source_url=None, caption="", hint_pid=None):
+def _review_submission(u, brand_id, path, sha, filename, language, source_url=None, caption="", hint_pid=None,
+                       alt_text=""):
     """Review one file and store the result. Returns (submission_id, None) or (None, message)."""
     brand = q("SELECT * FROM brands WHERE id=?", (brand_id,))[0]
     reg = json.loads(brand["registry"])
@@ -1191,12 +1303,17 @@ def _review_submission(u, brand_id, path, sha, filename, language, source_url=No
             screen = None if source_url else OCR.read_screen(path, MAX_SECONDS)
         rep = analyze(u, brand_id, segs, caption, reg, hint_pid, is_link=bool(source_url) and kind == "video", screen=screen,
                       kind=kind)
-        if kind == "image" and screen is not None:
-            af, ac = AST.check_image(path, screen["lines"], reg, make_finding)
+        lines = (screen or {}).get("lines") or []
+        af, ac = AST.check_content(reg, make_finding, path=path if kind == "image" else None,
+                                   lines=lines, segments=segs, caption=caption, alt_text=alt_text or "",
+                                   kind=kind)
+        if af or ac:
             rep["findings"] += af
             rep["checks"] += ac
+            rep.setdefault("inputs", {})["alt_text"] = (alt_text or "")[:500]
             finish_report(rep)
         add_ai_review(rep, brand_id, reg)
+        attach_default_suggestions(rep, reg)
     except Exception as ex_:
         msg = str(ex_) if isinstance(ex_, (ValueError, RuntimeError)) else "Something went wrong while reviewing this file."
         return None, msg
@@ -1224,8 +1341,9 @@ def _review_submission(u, brand_id, path, sha, filename, language, source_url=No
     return sid, None
 
 
-def run_review(u, brand_id, path, sha, filename, language, source_url=None, caption="", hint_pid=None):
-    sid, msg = review_submission(u, brand_id, path, sha, filename, language, source_url, caption, hint_pid)
+def run_review(u, brand_id, path, sha, filename, language, source_url=None, caption="", hint_pid=None, alt_text=""):
+    sid, msg = review_submission(u, brand_id, path, sha, filename, language, source_url, caption, hint_pid,
+                                 alt_text=alt_text)
     return err_page(u, msg) if msg else RedirectResponse(f"/s/{sid}", 303)
 
 
@@ -1266,12 +1384,13 @@ async def confirm_project(request: Request, sid: int):
                              "conf": l["conf"]} for l in scr_old], "frames": 1, "total": 1, "partial": False}
     rep = analyze(u, s["brand_id"], segs, caption, reg, confirmed=ids, is_link=bool(s["source_url"]) and kind == "video",
                   screen=screen, kind=kind)
-    keep = [f for f in old.get("findings", []) if f["type"] in ("LOW_CONTRAST", "SMALL_TEXT", "OFF_PALETTE", "LOGO_MISSING")]
+    keep = [f for f in old.get("findings", []) if f["type"] in AST.ASSET_TYPES]
     if keep:
         rep["findings"] += keep
-        rep["checks"] += [c for c in old.get("checks", []) if c[0] in ("Text contrast and size", "Brand colours", "Brand logo")]
+        rep["checks"] += [c for c in old.get("checks", []) if c[0] in AST.ASSET_CHECK_NAMES]
         finish_report(rep)
     add_ai_review(rep, s["brand_id"], reg)
+    attach_default_suggestions(rep, reg)
     if old.get("duplicate_of"):
         rep["duplicate_of"] = old["duplicate_of"]
     status = status_of(rep)
@@ -1291,7 +1410,7 @@ async def confirm_project(request: Request, sid: int):
 
 @app.post("/upload")
 def upload(request: Request, brand_id: int = Form(...), language: str = Form("auto"),
-           project_id: str = Form(""), file: UploadFile = File(...)):
+           project_id: str = Form(""), file: UploadFile = File(...), alt_text: str = Form("")):
     u = me(request)
     if not u or u["role"] != "submitter":
         return RedirectResponse("/", 303)
@@ -1304,7 +1423,8 @@ def upload(request: Request, brand_id: int = Form(...), language: str = Form("au
     except Exception as ex_:
         return err_page(u, str(ex_) if isinstance(ex_, (ValueError, RuntimeError)) else "Upload failed.")
     return run_review(u, brand_id, path, sha, file.filename, language,
-                      hint_pid=int(project_id) if project_id.isdigit() else None)
+                      hint_pid=int(project_id) if project_id.isdigit() else None,
+                      alt_text=(alt_text or "").strip()[:500])
 
 
 @app.post("/upload_link")
@@ -1353,6 +1473,30 @@ def upload_page(request: Request, brand_id: int = Form(...), url: str = Form(...
                       hint_pid=int(project_id) if project_id.isdigit() else None)
 
 
+@app.post("/upload_text")
+def upload_text(request: Request, brand_id: int = Form(...), text: str = Form(...), title: str = Form(""),
+                project_id: str = Form("")):
+    """Paste marketing copy (caption, email, ad text) and review it as a document — no speech key needed."""
+    u = me(request)
+    if not u or u["role"] != "submitter":
+        return RedirectResponse("/", 303)
+    if not allowed_brand(u, brand_id):
+        return err_page(u, "You are not linked to that company.")
+    if too_many_uploads(u):
+        return err_page(u, too_many_uploads(u))
+    body = (text or "").strip()
+    if len(body) < 12:
+        return err_page(u, "Paste at least a short sentence of copy to review.")
+    if len(body) > 20000:
+        return err_page(u, "That text is too long to review in one go (20,000 character limit).")
+    name = (title or "Pasted copy").strip()[:80] or "Pasted copy"
+    path = UPLOAD_DIR / (uuid.uuid4().hex + ".txt")
+    path.write_text(body, encoding="utf-8")
+    sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return run_review(u, brand_id, path, sha, name, "auto",
+                      hint_pid=int(project_id) if project_id.isdigit() else None)
+
+
 # ------------------------------------------------------------- result / review
 TYPE_LABEL = {
     "PRICE_MISMATCH": "Price does not match the approved price",
@@ -1381,6 +1525,11 @@ TYPE_LABEL = {
     "CONFIDENTIAL_LIKELY": "Confidential figure mentioned",
     "LOW_CONTRAST": "Text is hard to read (low contrast)", "SMALL_TEXT": "Text smaller than the brand minimum",
     "OFF_PALETTE": "Colour outside the brand palette", "LOGO_MISSING": "Brand logo not found", "NO_TEXT_FOUND": "No text found",
+    "OFF_BRAND_COLOR": "Off-brand colour named in copy", "LOGO_MENTION_MISSING": "Brand/logo name missing from copy",
+    "VISUAL_DONT": "Matches a brand visual don’t", "FONT_OFF_BRAND": "Font name not on the brand list",
+    "ALL_CAPS": "Shouty ALL CAPS hurts readability", "WALL_OF_TEXT": "Long block with little punctuation",
+    "COLOR_ONLY_CUE": "Instruction relies on colour alone", "UNCLEAR_CTA": "Vague call to action",
+    "MISSING_ALT": "Image missing alt text / description",
     "TERMINOLOGY": "Preferred wording", "TONE": "Tone of voice", "SPEECH_UNCLEAR": "Speech was hard to recognise",
     "BANNED_PARAPHRASE": "Same meaning as a banned phrase (AI)", "AI_TONE": "Tone (AI review)",
     "AI_TERMINOLOGY": "Terminology (AI review)", "AI_CLARITY": "Hard to follow (AI review)",
@@ -1403,7 +1552,7 @@ SECTIONS = [
     ("Wording and tone suggestions", lambda t: t in ("TERMINOLOGY", "TONE", "AI_TONE", "AI_TERMINOLOGY", "AI_CLARITY",
                                                      "AI_ADVICE", "AI_LOWCONF")),
     ("Speech clarity", lambda t: t == "SPEECH_UNCLEAR"),
-    ("Brand assets and accessibility", lambda t: t in ("LOW_CONTRAST", "SMALL_TEXT", "OFF_PALETTE", "LOGO_MISSING")),
+    ("Brand assets and accessibility", lambda t: t in AST.ASSET_TYPES),
 ]
 SUGGESTABLE = ("BANNED_PHRASE", "UNSUPPORTED_CLAIM", "TERMINOLOGY", "TONE")
 ACTION_LABEL = {
@@ -1421,7 +1570,8 @@ ACTION_LABEL = {
     "LESSON_LEARNED": "Lesson written from dispute", "LESSON_APPLIED": "Earlier decision applied",
     "LESSON_CHANGED": "Lesson changed", "COMPANY_CREATED": "Company created", "INVITE_CREATED": "Invite created",
     "INVITE_ACCEPTED": "Invite accepted", "INVITE_CANCELLED": "Invite cancelled", "MEMBER_REMOVED": "Member removed",
-    "REWRITE_SUGGESTED": "Wording suggestion created", "PACK_APPLIED": "Industry rules added", "FACT_TYPE_SET": "Fact type saved", "PASSWORD_RESET_REQUESTED": "Password reset requested",
+    "REWRITE_SUGGESTED": "Wording suggestion created", "REWRITE_APPLIED": "Suggested wording chosen",
+    "PACK_APPLIED": "Industry rules added", "FACT_TYPE_SET": "Fact type saved", "PASSWORD_RESET_REQUESTED": "Password reset requested",
     "PASSWORD_RESET": "Password reset", "PASSWORD_CHANGED": "Password changed", "FACT_TYPE_REMOVED": "Fact type removed",
     "IMPORT_APPLIED": "Products and facts imported", "SAMPLE_LOADED": "Sample data loaded", "AI_DISMISSED": "AI concern dismissed", "AI_BANNED": "AI concern added to banned phrases", "BATCH_STARTED": "Bulk batch queued", "BATCH_DONE": "Bulk batch finished",
 }
@@ -1454,7 +1604,7 @@ def finding_html(f, sid=None, rep=None, can_suggest=False, can_decide=False):
         chip_txt = "Dismissed by a builder"
     status_chip = ui.badge(chip_txt, tone, {"warn": "alert", "neutral": "info"}.get(tone, "x-circle"))
     conf = ""
-    if f.get("confidence") is not None and not cap:
+    if f.get("confidence") is not None and not cap and float(f["confidence"]) < 0.995:
         conf = f' <span class="muted">Recognition confidence {round(float(f["confidence"]) * 100)}%</span>'
     note = ""
     if kind in UNCERTAIN:
@@ -1463,27 +1613,63 @@ def finding_html(f, sid=None, rep=None, can_suggest=False, can_decide=False):
     sug = ""
     if sid is not None and rep is not None and "i" in f and kind in SUGGESTABLE:
         got = (rep.get("suggestions") or {}).get(str(f["i"]))
+        applied = (rep.get("applied_rewrites") or {}).get(str(f["i"]))
         if got and got.get("rewrite"):
-            by = "Rule-based replacement" if got.get("by") == "rule" else "AI-written. Check it before using it."
-            sug = (f'<dt>Suggested wording</dt><dd><div class="muted">Instead of: {e(got["sentence"])}</div>'
-                   f'<div><b>{e(got["rewrite"])}</b></div><div class="muted">{by}</div></dd>')
+            by = ("Rule-based suggestion (no AI). Check it fits before using it." if got.get("by") == "rule"
+                  else "AI-written. Check it before using it.")
+            strat = f' · {e(got.get("strategy", "").replace("_", " "))}' if got.get("strategy") else ""
+            side = (
+                f'<div class="side-by-side"><div class="pane orig"><div class="lbl">Original</div>{e(got["sentence"])}</div>'
+                f'<div class="pane fix"><div class="lbl">Compliant</div><b>{e(got["rewrite"])}</b></div></div>')
+            variants = got.get("variants") or []
+            var_html = ""
+            if variants:
+                bits = []
+                for vi, v in enumerate(variants[:3]):
+                    bits.append(
+                        f'<div class="rewrite-var"><div><div class="strat">{ui.icon("wand", 14)}{e(v.get("label") or v.get("strategy") or "Rewrite")}</div>'
+                        f'<div style="margin-top:4px">{e(v["text"])}</div>'
+                        f'<div class="muted" style="margin-top:4px">{e(v.get("why") or "")}</div></div>'
+                        f'<form method="post" action="/apply-rewrite/{sid}/{f["i"]}" data-lock>'
+                        f'<input type="hidden" name="variant" value="{vi}">'
+                        f'<button class="btn secondary sm" type="submit">{ui.icon("check", 14)}Apply</button></form></div>')
+                var_html = f'<div class="rewrite-variants">{"".join(bits)}</div>'
+            else:
+                var_html = (
+                    f'<form method="post" action="/apply-rewrite/{sid}/{f["i"]}" data-lock style="margin-top:8px">'
+                    f'<input type="hidden" name="variant" value="0">'
+                    f'<button class="btn secondary sm" type="submit">{ui.icon("check", 14)}Apply suggestion</button></form>')
+            applied_note = ""
+            if applied:
+                applied_note = (f'<div class="alert ok" style="margin-top:8px">{ui.icon("check-circle", 16)}'
+                                f'<div><b>Chosen as your fix.</b> Use this wording when you edit and resubmit: {e(applied.get("text") or "")}</div></div>')
+            more = ""
+            if got.get("by") == "rule" and can_suggest and llm_ready():
+                more = (f'<form method="post" action="/suggest/{sid}/{f["i"]}" style="margin-top:8px">'
+                        f'<button class="btn secondary sm" type="submit">{ui.icon("wand", 14)}Ask the AI for another wording</button></form>')
+            sug = (f'<dt>Suggested wording</dt><dd><div class="rewrite-box">'
+                   f'<div class="muted">{by}{strat}</div>{side}{var_html}{applied_note}{more}</div></dd>')
         elif got:
             sug = f'<dt>Suggested wording</dt><dd class="muted">{e(got.get("error") or "No suggestion available.")}</dd>'
         elif can_suggest:
             sug = (f'<dt>Suggested wording</dt><dd><form method="post" action="/suggest/{sid}/{f["i"]}" style="display:inline">'
-                   f'<button class="btn secondary sm" type="submit">Suggest compliant wording</button></form></dd>')
+                   f'<button class="btn secondary sm" type="submit">{ui.icon("wand", 14)}Suggest compliant wording</button></form></dd>')
     if f.get("ai"):
         if f.get("alternative"):
             sug += (f'<dt>Suggested wording</dt><dd><b>{e(f["alternative"])}</b>'
                     f'<div class="muted">Written by the AI reviewer. Check it before using it.</div></dd>')
         if can_decide and sid is not None and "i" in f and f["type"] == "BANNED_PARAPHRASE" and not f.get("dismissed") and not f.get("confirmed"):
             sug += (f'<dt>Decision</dt><dd><form method="post" action="/ai/{sid}/{f["i"]}/ban" style="display:inline" data-lock>'
-                    f'<button class="btn sm" type="submit">Yes, same claim: add to banned phrases</button></form> '
+                    f'<button class="btn sm" type="submit">{ui.icon("thumbs-up", 14)}Yes, same claim: add to banned phrases</button></form> '
                     f'<form method="post" action="/ai/{sid}/{f["i"]}/dismiss" style="display:inline" data-lock>'
-                    f'<button class="btn secondary sm" type="submit">No, harmless: dismiss</button></form></dd>')
+                    f'<button class="btn secondary sm" type="submit">{ui.icon("thumbs-down", 14)}No, harmless: dismiss</button></form></dd>')
         elif f.get("confirmed"):
             sug += '<dt>Decision</dt><dd>Confirmed as the same claim and added to the banned phrases.</dd>'
-    return (f'<div class="finding {tone}"><div class="finding-top">{status_chip}<b>{e(label)}</b>{conf}</div>'
+    sev_ic = {"CRITICAL": "zap", "HIGH": "alert", "MEDIUM": "info", "LOW": "check"}.get(
+        str(f.get("severity") or "").upper(), "info")
+    return (f'<div class="finding {tone}"><div class="finding-top">{status_chip}'
+            f'{ui.badge(str(f.get("severity") or ""), tone, sev_ic)}'
+            f'<b>{e(label)}</b>{conf}</div>'
             f'<dl><dt>Where</dt><dd>{e(where)}</dd>'
             f'<dt>Detected</dt><dd>{e(str(f["evidence"]))}</dd>'
             f'<dt>Why it matters</dt><dd>{e(f["explanation"])}</dd>{note}'
@@ -1508,11 +1694,12 @@ IDENT_TEXT = {
 }
 
 
-def claims_table(claims):
+def claims_table(claims, timed=True):
     rows = []
     for c in claims:
         b = VERDICT_BADGE.get(c["verdict"], VERDICT_BADGE["REVIEW"])
         when = ("Caption" if c.get("source") == "caption" else
+                "In the content" if not timed else
                 f'{fmt_time(c.get("time") or 0)} (screen)' if c.get("source") == "screen" else fmt_time(c.get("time") or 0))
         off = e(str(c.get("official") or "-"))
         if c.get("fact_version"):
@@ -1597,12 +1784,22 @@ def view_submission(request: Request, sid: int):
     summary = ui.card("", f'<div class="verdict {tone}">{ui.icon(ic, 26)}<div><h2>{e(ui.STATUS.get(s["status"], (s["status"],))[0])}</h2>'
                       f'<p>{e(why)}</p><p style="margin-top:10px">{counts}</p></div></div>{approval}')
 
+    # Brand Risk Radar (explainable pre-flight score) — always compute so older reports still show it
+    radar_html, _risk = GOV.risk_radar_html(rep, icon_fn=ui.icon)
+    radar_card = ui.card("Brand Risk Radar", radar_html,
+                         "Pre-flight score across claims, tone, facts, visual, accessibility and confidentiality. "
+                         "Expand any spoke for the concrete findings behind it.")
+
+    # Claim → fact provenance panel
+    claim_graph = ui.card("Claim provenance", GOV.claim_graph_html(rep, icon_fn=ui.icon),
+                          "Each promotional claim mapped to an approved fact: matched, mismatched, or unsupported.")
+
     # ---- actions
     actions, dialogs = "", ""
     said_val = (s["dispute_said"] or "") if "dispute_said" in s.keys() else ""
     if not admin and s["user_id"] == u["id"] and s["status"] in ("REJECTED", "BLOCKED"):
         actions = ui.card("What would you like to do?",
-                          f'<p class="muted">Fix the issues and <a href="/submit">submit a corrected video</a>, or dispute the '
+                          f'<p class="muted">Fix the issues and <a href="/submit">submit a corrected version</a>, or dispute the '
                           f'decision if you believe a finding is wrong.</p>'
                           f'<button type="button" class="btn secondary" data-dialog="dlg-dispute">{ui.icon("scale", 16)}Raise a dispute</button>')
         dialogs = (
@@ -1634,8 +1831,8 @@ def view_submission(request: Request, sid: int):
         yes, no = ("Overturn decision", "Uphold rejection") if disputed else ("Approve", "Reject")
         actions = ui.card("Your decision", ctx + '<p class="muted">Review the findings, then record a decision. '
                           'It is saved to the audit trail.</p>'
-                          f'<div class="form-actions"><button type="button" class="btn success" data-dialog="dlg-approve">{ui.icon("check", 16)}{yes}</button>'
-                          f'<button type="button" class="btn danger" data-dialog="dlg-reject">{ui.icon("x", 16)}{no}</button></div>')
+                          f'<div class="form-actions"><button type="button" class="btn success" data-dialog="dlg-approve">{ui.icon("thumbs-up", 16)}{yes}</button>'
+                          f'<button type="button" class="btn danger" data-dialog="dlg-reject">{ui.icon("thumbs-down", 16)}{no}</button></div>')
         dialogs = (ui.confirm_dialog("dlg-approve", f"{yes}?",
                                      "This approves the content and issues an approval ID." if not disputed else
                                      "This approves the content and issues an approval ID. The creator's dispute is resolved in their favour.",
@@ -1755,7 +1952,7 @@ def view_submission(request: Request, sid: int):
         ai_card = ui.card("AI review", body_, "Advice only. The AI never approves or rejects. Rules and people decide.")
     findings_card = ui.card("Compliance findings", "".join(parts))
     new_claims = [c for c in claims if "verdict" in c]
-    claims_card = (ui.card("Claim-by-claim checks", claims_table(new_claims),
+    claims_card = (ui.card("Claim-by-claim checks", claims_table(new_claims, timed=ckind in ("video", "audio")),
                            "Every claim found in the content, what it was compared with, and the result.") if new_claims else "")
     extra = identity_card(rep) + checks_card(rep)
     notes = ""
@@ -1791,8 +1988,10 @@ def view_submission(request: Request, sid: int):
     audit = ui.card("History", timeline_html(au))
 
     crumbs = [("Review Queue" if admin else "My Submissions", "/queue" if admin else "/reviews"), (f"Submission #{sid}", None)]
-    body = (ui.page_header(f"Submission #{sid}", e(s["filename"] or ""), '<a class="btn secondary" href="/reviews">Back to list</a>')
-            + '<div class="stack">' + summary + notes + confirm + actions + '<div class="cols"><div class="stack">' + details + extra + transcript
+    body = (ui.page_header(f"Submission #{sid}", e(s["filename"] or ""),
+                           f'<a class="btn secondary" href="/reviews">{ui.icon("list", 16)}Back to list</a>')
+            + '<div class="stack">' + summary + radar_card + notes + confirm + actions
+            + '<div class="cols"><div class="stack">' + details + extra + claim_graph + transcript
             + '</div><div class="stack">' + claims_card + ai_card + findings_card + audit + '</div></div></div>' + dialogs)
     return page(f"Submission {sid}", body, u, "queue" if admin and s["status"] in QUEUE_STATUSES else "reviews", crumbs, request)
 
@@ -2152,8 +2351,91 @@ def admin_dash(request, u):
             + '</div>'
             + ui.card("Priority reviews", prio, actions='<a href="/queue">Open queue</a>' if queue else "")
             + '<div class="grid-2">' + ui.card("Recent activity", timeline_html(recent), actions='<a href="/audit">Full audit trail</a>')
-            + ui.card("Compliance insights", insights) + '</div></div>')
+            + ui.card("Compliance insights", insights, actions='<a href="/admin/insights">Open insights</a>') + '</div></div>')
     return page("Overview", body, u, "overview", [], request)
+
+
+def compliance_insights(brand_id):
+    """Aggregate repeated mistakes and signals that guidelines may be unclear."""
+    rows = q(SUB_SQL + "WHERE s.brand_id=?", (brand_id,))
+    types, sources, kinds, by_user = Counter(), Counter(), Counter(), Counter()
+    wording = Counter()
+    for r in rows:
+        kinds[r["status"]] += 1
+        by_user[r["uname"] or "Unknown"] += 1 if r["status"] in REJECTED_STATUSES else 0
+        rep = rep_of(r)
+        for f in rep.get("findings", []):
+            types[f.get("type", "?")] += 1
+            sources[f.get("source") or "audio"] += 1
+            if f.get("type") in ("BANNED_PHRASE", "UNSUPPORTED_CLAIM", "TERMINOLOGY", "TONE",
+                                 "AI_TONE", "AI_TERMINOLOGY", "BANNED_PARAPHRASE"):
+                wording[str(f.get("evidence") or "")[:80]] += 1
+    ov = q("""SELECT a.action, COUNT(*) AS c FROM audit a JOIN submissions s ON s.id=a.sub_id
+              WHERE s.brand_id=? AND a.action IN ('DISPUTE_OVERTURNED','DISPUTE_UPHELD') GROUP BY a.action""", (brand_id,))
+    ovd = {r["action"]: r["c"] for r in ov}
+    overturned, upheld = ovd.get("DISPUTE_OVERTURNED", 0), ovd.get("DISPUTE_UPHELD", 0)
+    decided = overturned + upheld
+    overturn_rate = (overturned / decided) if decided else 0.0
+    unclear = overturn_rate >= 0.4 and decided >= 2
+    top_creators = [(name, n) for name, n in by_user.most_common(8) if n]
+    return {
+        "total": len(rows), "types": types, "sources": sources, "statuses": kinds,
+        "wording": wording, "overturned": overturned, "upheld": upheld,
+        "overturn_rate": overturn_rate, "unclear": unclear, "creators": top_creators,
+    }
+
+
+@app.get("/admin/insights", response_class=HTMLResponse)
+def insights_page(request: Request):
+    u = admin_only(request)
+    if not u:
+        return RedirectResponse("/", 303)
+    brand = q("SELECT * FROM brands WHERE id=?", (u["brand_id"],))[0]
+    data = compliance_insights(u["brand_id"])
+    if not data["total"]:
+        body = (ui.page_header("Compliance Insights", f"Patterns across reviews for {e(brand['name'])}.")
+                + ui.empty("No submissions yet", "Insights appear after creators submit content for review."))
+        return page("Compliance Insights", body, u, "insights", [("Compliance Insights", None)], request)
+    top = "".join(f"<li>{e(TYPE_LABEL.get(k, k))}: <b>{v}</b></li>" for k, v in data["types"].most_common(10)) or "<li>None</li>"
+    src = "".join(f"<li>{e({'audio': 'Spoken', 'screen': 'On screen / document', 'caption': 'Caption'}.get(k, k))}: <b>{v}</b></li>"
+                  for k, v in data["sources"].most_common()) or "<li>None</li>"
+    words = "".join(f"<li><span class='mono'>{e(k)}</span>: <b>{v}</b></li>"
+                    for k, v in data["wording"].most_common(8) if k) or "<li>No repeated wording flags yet.</li>"
+    creators = "".join(f"<li>{e(n)}: <b>{c}</b> rejection(s)</li>" for n, c in data["creators"]) or "<li>No rejections yet.</li>"
+    rate_pct = round(data["overturn_rate"] * 100)
+    if data["unclear"]:
+        clarity = ui.alert(
+            f"{rate_pct}% of resolved disputes were overturned ({data['overturned']} of {data['overturned'] + data['upheld']}). "
+            "That often means a rule is too broad, a preferred term is missing, or creators were never told the guideline. "
+            "Review Brand Rules and add clearer preferred wording or tone notes.",
+            "warn", "Guidelines may be unclear")
+    elif data["overturned"] or data["upheld"]:
+        clarity = ui.alert(
+            f"Dispute overturn rate: {rate_pct}% ({data['overturned']} overturned, {data['upheld']} upheld). "
+            "A low rate usually means rules are understood; keep watching repeats in the lists below.",
+            "ok", "Dispute signal")
+    else:
+        clarity = ui.alert("No disputes have been resolved yet. After creators dispute and you decide, this page shows whether guidelines need clearer wording.", "info")
+    status_bits = "".join(
+        f'<div class="stat"><div class="stat-label">{e(ui.STATUS.get(k, (k,))[0] if k in ui.STATUS else k)}</div>'
+        f'<div class="stat-value">{v}</div></div>' for k, v in data["statuses"].most_common())
+    rows = q(SUB_SQL + "WHERE s.brand_id=?", (u["brand_id"],))
+    health_cards = GOV.guideline_health(rows, rep_of, TYPE_LABEL)
+    health = ui.card("Guideline Health", GOV.guideline_health_html(health_cards, icon_fn=ui.icon),
+                     "Meta-intelligence: rules that look too strict, too vague, or need clearer creator guidance — with evidence counts.")
+    body = (ui.page_header("Compliance Insights",
+                           f"Repeated mistakes and signals that brand guidelines for {e(brand['name'])} may need clearer wording.",
+                           f'<a class="btn secondary" href="/admin/rules">{ui.icon("shield", 16)}Edit Brand Rules</a>')
+            + '<div class="stack">' + clarity + health
+            + f'<div class="stats">{status_bits}</div>'
+            + '<div class="grid-2">'
+            + ui.card("Most common findings", f"<ul style='margin:0;padding-left:20px'>{top}</ul>")
+            + ui.card("Where issues appear", f"<ul style='margin:0;padding-left:20px'>{src}</ul>")
+            + ui.card("Repeated wording flags", f"<ul style='margin:0;padding-left:20px'>{words}</ul>"
+                      "<p class='muted'>The same banned phrase or tone note firing often is a training or guideline gap.</p>")
+            + ui.card("Creators with most rejections", f"<ul style='margin:0;padding-left:20px'>{creators}</ul>")
+            + '</div></div>')
+    return page("Compliance Insights", body, u, "insights", [("Compliance Insights", None)], request)
 
     
 
@@ -2162,10 +2444,13 @@ def lines(s):
 
 
 def parse_price(s):
-    s = s.strip()
+    s = (s or "").strip()
     try:
-        return int(float(s.replace(",", "")))
-    except ValueError:
+        v = float(s.replace(",", ""))
+        if math.isfinite(v) and 0 <= v < 1e13:
+            return int(v)
+        return None
+    except (ValueError, OverflowError):
         pass
     found = extract_prices(s)
     return found[0]["value"] if found else None
@@ -2246,18 +2531,43 @@ def rules_page(request: Request, err: str = ""):
 def assets_card(reg):
     c = AST.config(reg)
     logo = ("Logo uploaded." if c.get("logo") and os.path.exists(c["logo"]) else "No logo uploaded.")
-    return ui.card("Brand assets and accessibility (images and posters)",
-                   f'<form method="post" action="/admin/assets" enctype="multipart/form-data" data-lock><div class="field-grid">'
+    return ui.card("Brand assets, visual consistency and accessibility",
+                   f'<form method="post" action="/admin/assets" enctype="multipart/form-data" data-lock>'
+                   f'<p class="muted">Applies to posters <b>and</b> paste/docs/OCR text. Contrast and pixel palette stay image-only.</p>'
+                   f'<div class="field-grid">'
                    f'<div><label for="pal">Brand colours (hex)</label><input id="pal" name="palette" value="{e(", ".join(c["palette"]))}" '
                    f'placeholder="#1F3A5F, #F2A900"></div>'
+                   f'<div><label for="pnames">Approved colour names</label><input id="pnames" name="palette_names" '
+                   f'value="{e(", ".join(c["palette_names"]))}" placeholder="navy, gold, blue"></div>'
                    f'<div><label for="mc">Minimum text contrast</label><input id="mc" name="min_contrast" value="{c["min_contrast"]:g}"></div>'
                    f'<div><label for="mt">Smallest text (% of image height)</label><input id="mt" name="min_text_pct" value="{c["min_text_pct"]:g}"></div>'
-                   f'<div><label for="lg">Logo (PNG or JPG)</label><input id="lg" type="file" name="logo" accept="image/png,image/jpeg"></div></div>'
+                   f'<div><label for="lg">Logo (PNG or JPG)</label><input id="lg" type="file" name="logo" accept="image/png,image/jpeg"></div>'
+                   f'<div><label for="lname">Logo / brand name in copy</label><input id="lname" name="logo_name" value="{e(c.get("logo_name") or "")}" '
+                   f'placeholder="Demo Developer"></div>'
+                   f'<div><label for="fonts">Approved fonts</label><input id="fonts" name="fonts" value="{e(", ".join(c["fonts"]))}" '
+                   f'placeholder="Montserrat, Open Sans"></div>'
+                   f'<div><label for="wall">Wall-of-text threshold (chars)</label><input id="wall" name="wall_text_chars" '
+                   f'value="{int(c.get("wall_text_chars") or 600)}"></div></div>'
+                   f'<label for="vdont">Visual don’ts <span class="muted">(comma-separated)</span></label>'
+                   f'<input id="vdont" name="visual_donts" value="{e(", ".join(c["visual_donts"]))}" '
+                   f'placeholder="comic sans, neon pink, drop shadow spam">'
+                   f'<label for="vdos">Visual dos <span class="muted">(optional notes)</span></label>'
+                   f'<input id="vdos" name="visual_dos" value="{e(", ".join(c["visual_dos"]))}" '
+                   f'placeholder="use navy headlines, generous whitespace">'
                    f'<p><label><input type="checkbox" name="check_palette" value="1" {"checked" if c["check_palette"] else ""}> '
-                   f'Point out large areas in non-brand colours</label><br>'
+                   f'{ui.icon("image", 14)} Point out large image areas in non-brand colours</label><br>'
+                   f'<label><input type="checkbox" name="check_color_words" value="1" {"checked" if c["check_color_words"] else ""}> '
+                   f'Flag off-brand colour words in paste / docs / OCR</label><br>'
                    f'<label><input type="checkbox" name="require_logo" value="1" {"checked" if c["require_logo"] else ""}> '
-                   f'Every poster must show the logo</label></p>'
-                   f'<p class="hint">{logo} Contrast 4.5 is the WCAG level for normal text (large text needs 3). Fonts are not checked.</p>'
+                   f'Every poster must show the logo (image match)</label><br>'
+                   f'<label><input type="checkbox" name="require_logo_mention" value="1" {"checked" if c["require_logo_mention"] else ""}> '
+                   f'Text creatives must mention the logo / brand name</label><br>'
+                   f'<label><input type="checkbox" name="require_alt_text" value="1" {"checked" if c["require_alt_text"] else ""}> '
+                   f'{ui.icon("eye", 14)} Require alt text / image description on image uploads</label><br>'
+                   f'<label><input type="checkbox" name="check_text_a11y" value="1" {"checked" if c["check_text_a11y"] else ""}> '
+                   f'Text accessibility (ALL CAPS, wall of text, colour-only cues, weak CTAs)</label></p>'
+                   f'<p class="hint">{logo} Contrast 4.5 is WCAG for normal text. Font identification on pixels is not attempted — '
+                   f'font checks are name mentions in copy only.</p>'
                    f'<button class="btn" type="submit">Save brand assets</button></form>')
 
 
@@ -2273,11 +2583,21 @@ async def save_assets(request: Request):
         c["palette"] = AST.parse_palette(f.get("palette", ""))
         c["min_contrast"] = min(21.0, max(1.0, float(f.get("min_contrast") or 4.5)))
         c["min_text_pct"] = min(20.0, max(0.1, float(f.get("min_text_pct") or 1.2)))
+        c["wall_text_chars"] = min(5000, max(120, int(float(f.get("wall_text_chars") or 600))))
     except ValueError:
-        request.session["flash"] = "Contrast and text size must be numbers."
+        request.session["flash"] = "Contrast, text size and wall-of-text threshold must be numbers."
         return RedirectResponse("/admin/rules", 303)
+    c["palette_names"] = AST.parse_list(f.get("palette_names", ""), 24)
+    c["fonts"] = AST.parse_list(f.get("fonts", ""), 16)
+    c["visual_donts"] = AST.parse_list(f.get("visual_donts", ""), 24)
+    c["visual_dos"] = AST.parse_list(f.get("visual_dos", ""), 24)
+    c["logo_name"] = (f.get("logo_name") or "").strip()[:80]
     c["check_palette"] = bool(f.get("check_palette"))
+    c["check_color_words"] = bool(f.get("check_color_words"))
     c["require_logo"] = bool(f.get("require_logo"))
+    c["require_logo_mention"] = bool(f.get("require_logo_mention"))
+    c["require_alt_text"] = bool(f.get("require_alt_text"))
+    c["check_text_a11y"] = bool(f.get("check_text_a11y"))
     up = f.get("logo")
     if up is not None and getattr(up, "filename", ""):
         data = await up.read()
@@ -2294,6 +2614,9 @@ async def save_assets(request: Request):
     if c["require_logo"] and not c.get("logo"):
         c["require_logo"] = False
         request.session["flash"] = "Upload a logo before making it required."
+    if c["require_logo_mention"] and not c.get("logo_name"):
+        c["require_logo_mention"] = False
+        request.session.setdefault("flash", "Set a logo / brand name before requiring it in copy.")
     reg["assets"] = c
     save_reg(u, reg)
     log(None, u["name"], "RULE_CHANGED", "Brand assets and accessibility settings updated", u["brand_id"])
@@ -2594,9 +2917,8 @@ def parse_fact_value(key, raw):
             raise ValueError("Enter a price greater than zero, for example 13000000 or 1.3 Cr.")
         return float(v), None
     if key in RE.NUMERIC_FIELDS or key.startswith("landmark:"):
-        try:
-            v = float(raw.replace(",", ""))
-        except ValueError:
+        v = GEN._number(raw)
+        if v is None:
             raise ValueError("Enter a number.")
         if v <= 0:
             raise ValueError("The number must be greater than zero.")
@@ -4423,6 +4745,41 @@ def ai_ban(request: Request, sid: int, i: int):
 
 
 # ============================================================ suggested wording
+@app.post("/apply-rewrite/{sid}/{i}")
+def apply_rewrite(request: Request, sid: int, i: int, variant: int = Form(0)):
+    """Apply a counterfactual rewrite variant to the submission draft (advice → chosen fix)."""
+    u, s = me(request), get_sub(sid)
+    if not (u and s and can_view(u, s)):
+        return RedirectResponse("/", 303)
+    rep = rep_of(s)
+    got = (rep.get("suggestions") or {}).get(str(i)) or {}
+    variants = got.get("variants") or []
+    text = None
+    strategy = got.get("strategy") or "rewrite"
+    if variants and 0 <= variant < len(variants):
+        text = variants[variant].get("text")
+        strategy = variants[variant].get("strategy") or strategy
+    elif got.get("rewrite") and variant == 0:
+        text = got["rewrite"]
+    if not text:
+        request.session["flash"] = "No rewrite variant to apply."
+        return RedirectResponse(f"/s/{sid}", 303)
+    applied = rep.setdefault("applied_rewrites", {})
+    applied[str(i)] = {"text": text, "strategy": strategy, "sentence": got.get("sentence") or ""}
+    # Also set as the primary suggested rewrite so the side-by-side updates.
+    if str(i) in (rep.get("suggestions") or {}):
+        rep["suggestions"][str(i)]["rewrite"] = text
+        rep["suggestions"][str(i)]["strategy"] = strategy
+    # Append a lightweight draft lineage note on the report (passport-lite).
+    lineage = rep.setdefault("lineage", [])
+    lineage.append({"at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "action": "REWRITE_APPLIED",
+                    "finding": i, "strategy": strategy, "text": text[:200]})
+    ex("UPDATE submissions SET report=? WHERE id=?", (json.dumps(rep, ensure_ascii=False), sid))
+    log(sid, u["name"], "REWRITE_APPLIED", f"Finding {i}: {strategy}", s["brand_id"])
+    request.session["flash"] = "Saved as your chosen fix. Change your content to this wording, then resubmit."
+    return RedirectResponse(f"/s/{sid}", 303)
+
+
 @app.post("/suggest/{sid}/{i}")
 def suggest_wording(request: Request, sid: int, i: int):
     u, s = me(request), get_sub(sid)
@@ -4437,7 +4794,7 @@ def suggest_wording(request: Request, sid: int, i: int):
     if not (0 <= i < len(fs)) or fs[i]["type"] not in SUGGESTABLE:
         return RedirectResponse(f"/s/{sid}", 303)
     sugg = rep.setdefault("suggestions", {})
-    if str(i) in sugg:
+    if str(i) in sugg and (sugg[str(i)].get("by") == "ai" or not llm_ready() or fs[i]["type"] == "TERMINOLOGY"):
         return RedirectResponse(f"/s/{sid}", 303)
     if len(sugg) >= 10:
         request.session["flash"] = "Enough suggestions for this video. Fix these first."
@@ -4458,7 +4815,11 @@ def suggest_wording(request: Request, sid: int, i: int):
                         "error": None if text else "No preferred wording is set for this term."}
     else:
         text, err = RW.ai_rewrite(sentence, str(f["evidence"]), f["explanation"], reg)
+        if not text and (sugg.get(str(i)) or {}).get("rewrite"):
+            request.session["flash"] = f"{err} The rule-based suggestion is still shown."
+            return RedirectResponse(f"/s/{sid}", 303)
         sugg[str(i)] = {"sentence": sentence, "rewrite": text, "by": "ai", "error": err}
+    RW.attach_counterfactuals(rep, reg)
     ex("UPDATE submissions SET report=? WHERE id=?", (json.dumps(rep, ensure_ascii=False), sid))
     log(sid, u["name"], "REWRITE_SUGGESTED", f"Finding {i}: {f['type']}", s["brand_id"])
     return RedirectResponse(f"/s/{sid}", 303)

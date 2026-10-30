@@ -43,6 +43,25 @@ _ICONS = {
     "message": '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
     "eye": '<path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0"/><circle cx="12" cy="12" r="3"/>',
     "lock": '<rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    # --- wow / demo surfaces ---
+    "radar": '<circle cx="12" cy="12" r="2"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2"/><path d="M6.3 6.3 7.7 7.7M16.3 16.3l1.4 1.4M6.3 17.7 7.7 16.3M16.3 7.7l1.4-1.4"/><circle cx="12" cy="12" r="6"/><path d="m12 12 5-2"/>',
+    "sparkles": '<path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><path d="m5.6 5.6 2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/><circle cx="12" cy="12" r="3.2"/>',
+    "megaphone": '<path d="m3 11 18-5v12L3 13v-2z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/>',
+    "image": '<rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>',
+    "video": '<path d="m16 13 5.2 3.0V8L16 11"/><rect width="14" height="12" x="2" y="6" rx="2"/>',
+    "clipboard": '<rect width="14" height="16" x="5" y="4" rx="2"/><path d="M9 4V3a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1"/><path d="M9 12h6M9 16h4"/>',
+    "git-branch": '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M6 8.5v7M8.5 6h7M8.5 18c4 0 7-3 7-7"/>',
+    "passport": '<rect width="16" height="20" x="4" y="2" rx="2"/><circle cx="12" cy="10" r="3"/><path d="M8 17h8M9 7.5c.6-.8 1.7-1.3 3-1.3s2.4.5 3 1.3"/>',
+    "sliders": '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+    "vault": '<rect width="18" height="12" x="3" y="8" rx="2"/><path d="M7 8V6a5 5 0 0 1 10 0v2"/><circle cx="12" cy="14" r="2"/><path d="M12 16v2"/>',
+    "wand": '<path d="M15 4V2M15 16v-2M8 9H6M22 9h-2M18.4 4.6l1.4-1.4M18.4 13.4l1.4 1.4M11.6 4.6 10.2 3.2M16 9h.01"/><path d="m3 21 9-9M12.5 5.5l6 6"/>',
+    "layers": '<path d="m12 2 9 4.5-9 4.5L3 6.5 12 2z"/><path d="m3 12.5 9 4.5 9-4.5"/><path d="m3 17.5 9 4.5 9-4.5"/>',
+    "activity": '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+    "pen": '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+    "thumbs-up": '<path d="M7 10v12"/><path d="M15 5.88 14 10h5.8a2 2 0 0 1 1.9 2.6l-2.3 6.4a2 2 0 0 1-1.9 1.4H7V10h2.3a2 2 0 0 0 1.9-1.3L14 2.5a1.6 1.6 0 0 1 3 .9Z"/>',
+    "thumbs-down": '<path d="M17 14V2"/><path d="M9 18.12 10 14H4.2a2 2 0 0 1-1.9-2.6l2.3-6.4A2 2 0 0 1 6.5 3.6H17V14h-2.3a2 2 0 0 0-1.9 1.3L10 21.5a1.6 1.6 0 0 1-3-.9Z"/>',
+    "refresh": '<path d="M3 12a9 9 0 0 1 15.4-6.4L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.4 6.4L3 16"/><path d="M8 16H3v5"/>',
+    "zap": '<path d="M13 2 3 14h8l-1 8 10-12h-8l1-8z"/>',
 }
 
 
@@ -57,12 +76,13 @@ NAV_ADMIN = [
     ("overview", "/", "Overview", "home"),
     ("queue", "/queue", "Review Queue", "inbox"),
     ("reviews", "/reviews", "All Reviews", "list"),
+    ("insights", "/admin/insights", "Compliance Insights", "activity"),
     ("rules", "/admin/rules", "Brand Rules", "shield"),
     ("facts", "/admin/projects", "Projects and Facts", "tag"),
     ("access", "/admin/access", "Project Access", "users"),
     ("team", "/admin/team", "Team and Invites", "users"),
     ("disputes", "/disputes", "Disputes", "scale"),
-    ("learned", "/admin/learned", "Lessons", "history"),
+    ("learned", "/admin/learned", "Lessons", "sparkles"),
     ("approvals", "/approvals", "Approval Records", "badge-check"),
     ("audit", "/audit", "Audit Trail", "history"),
     ("verify", "/verify", "Verify a File", "file-check"),
@@ -71,7 +91,7 @@ NAV_ADMIN = [
 NAV_SUB = [
     ("overview", "/", "My Dashboard", "home"),
     ("submit", "/submit", "Submit Content", "upload"),
-    ("bulk", "/bulk", "Bulk Upload", "upload"),
+    ("bulk", "/bulk", "Bulk Upload", "layers"),
     ("reviews", "/reviews", "My Submissions", "folder"),
     ("disputes", "/disputes", "Disputes", "scale"),
     ("verify", "/verify", "Verify a File", "file-check"),
@@ -135,8 +155,9 @@ def card(title, inner, desc="", actions="", cls=""):
     return f'<section class="card {cls}">{h}{d}{inner}</section>'
 
 
-def empty(title, text="", action=""):
-    return (f'<div class="empty">{icon("inbox", 28)}<p class="empty-title">{e(title)}</p>'
+def empty(title, text="", action="", ic="inbox"):
+    return (f'<div class="empty"><span class="empty-ic">{icon(ic, 32)}</span>'
+            f'<p class="empty-title">{e(title)}</p>'
             f'<p class="muted">{text}</p>{action}</div>')
 
 
@@ -288,9 +309,10 @@ a.stat:hover{border-color:var(--blue)}
 .cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:20px;align-items:start}
 .cols-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px}
 .cols-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
-.empty{text-align:center;padding:32px 16px;color:var(--text-2)}
-.empty .ic{color:#9aa6b8;margin-bottom:6px}
-.empty-title{font-weight:600;color:var(--text);margin:0 0 4px}
+.empty{text-align:center;padding:36px 16px;color:var(--text-2)}
+.empty .ic,.empty-ic{color:#7a8aa3;margin-bottom:8px;display:inline-flex}
+.empty-ic{width:56px;height:56px;border-radius:14px;background:var(--blue-bg);color:var(--blue-dk);align-items:center;justify-content:center;margin:0 auto 12px}
+.empty-title{font-weight:650;color:var(--text);margin:0 0 4px;font-size:16px}
 
 /* chips, alerts */
 .chip{display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:999px;font-size:12.5px;font-weight:600;white-space:nowrap;background:var(--neutral-bg);color:var(--neutral)}
@@ -394,12 +416,73 @@ dialog.dlg h2{margin-bottom:8px;font-size:19px}
 .toast{background:var(--navy);color:#fff;padding:12px 16px;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.25);max-width:340px;font-size:14px}
 
 /* landing */
-.land{max-width:1040px;margin:0 auto;padding:40px 20px}
-.land-brand{display:flex;align-items:center;gap:10px;font-weight:650;font-size:20px;margin-bottom:28px}
-.land-brand .logo{width:34px;height:34px;border-radius:8px;background:var(--navy);display:grid;place-items:center;color:#fff}
-.role-card{display:flex;flex-direction:column;gap:10px}
-.role-card .ic-lg{width:40px;height:40px;border-radius:8px;background:var(--blue-bg);color:var(--blue-dk);display:grid;place-items:center}
+.land{max-width:1080px;margin:0 auto;padding:40px 20px 56px;
+  background:radial-gradient(1200px 420px at 10% -10%,#e8f0fd 0%,transparent 55%),
+             radial-gradient(900px 380px at 100% 0%,#e3f5ea 0%,transparent 50%),var(--bg)}
+.land-brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:21px;margin-bottom:28px;color:var(--navy);letter-spacing:-.02em}
+.land-brand .logo{width:38px;height:38px;border-radius:10px;background:linear-gradient(145deg,var(--navy),var(--blue));display:grid;place-items:center;color:#fff;box-shadow:0 4px 14px rgba(15,31,61,.22)}
+.land-hero{margin-bottom:28px;max-width:62ch}
+.land-hero h1{font-size:clamp(28px,4vw,36px);letter-spacing:-.025em;margin-bottom:10px}
+.land-hero .page-desc{font-size:16.5px;line-height:1.6}
+.role-card{display:flex;flex-direction:column;gap:10px;transition:border-color .15s,box-shadow .15s;min-height:100%}
+.role-card:hover{border-color:#b7c9ea;box-shadow:0 8px 24px rgba(15,31,61,.08)}
+.role-card .ic-lg{width:44px;height:44px;border-radius:11px;background:var(--blue-bg);color:var(--blue-dk);display:grid;place-items:center}
 .role-card .btn{margin-top:auto;align-self:flex-start}
+.feature-pills{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 0}
+.feature-pills span{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;background:#fff;border:1px solid var(--line);font-size:13px;font-weight:600;color:var(--text-2)}
+
+/* Brand Risk Radar */
+.radar-wrap{display:flex;flex-direction:column;gap:16px}
+.radar-score{display:flex;gap:14px;align-items:center}
+.radar-num{font-size:28px;font-weight:750;min-width:64px;min-height:64px;border-radius:16px;display:grid;place-items:center;padding:0 10px}
+.radar-grid{display:grid;grid-template-columns:minmax(200px,240px) minmax(0,1fr);gap:18px;align-items:start}
+.radar-svg{display:block;max-width:100%;height:auto;background:linear-gradient(180deg,#f7f9fc,#fff);border:1px solid var(--line);border-radius:12px}
+.radar-ring{fill:none;stroke:#d5dce8;stroke-width:1}
+.radar-axis{stroke:#c5cede;stroke-width:1}
+.radar-label{font-size:10px;fill:var(--text-2);font-family:var(--font)}
+.radar-dims{display:flex;flex-direction:column;gap:6px}
+.radar-dim{border:1px solid var(--line);border-radius:8px;background:#fff;padding:0}
+.radar-dim summary{display:flex;gap:8px;align-items:center;flex-wrap:wrap;cursor:pointer;padding:10px 12px;list-style:none;font-size:14px}
+.radar-dim summary::-webkit-details-marker{display:none}
+.radar-dim[open] summary{border-bottom:1px solid var(--line-2)}
+.radar-cites{margin:0;padding:8px 12px 12px 28px;font-size:13.5px}
+.radar-cites li{margin:4px 0}
+
+/* Claim → fact graph */
+.claim-graph{display:flex;flex-direction:column;gap:10px}
+.claim-edge{display:grid;grid-template-columns:minmax(0,1.1fr) 28px minmax(0,1.1fr) minmax(120px,.8fr);gap:10px;align-items:center;padding:12px;border:1px solid var(--line);border-left-width:4px;border-radius:8px;background:#fff}
+.claim-edge.ok{border-left-color:#2f9e5f}.claim-edge.bad{border-left-color:#d04444}.claim-edge.warn{border-left-color:#d99a1c}
+.claim-node{min-width:0}.claim-node b{display:block;overflow-wrap:anywhere;font-size:14px}
+.claim-arrow{display:grid;place-items:center;color:var(--text-2)}
+.claim-meta{display:flex;flex-direction:column;gap:4px;align-items:flex-start}
+
+/* Guideline health */
+.health-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.health-card{border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:#fff;border-top:3px solid var(--line)}
+.health-card.warn{border-top-color:#d99a1c;background:linear-gradient(180deg,#fffaf0,#fff)}
+.health-card.info{border-top-color:var(--blue);background:linear-gradient(180deg,#f5f8ff,#fff)}
+.health-card.ok{border-top-color:#2f9e5f}
+.health-top{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+/* Counterfactual rewrite variants */
+.rewrite-box{border:1px dashed #b7c0cf;border-radius:8px;padding:10px 12px;background:#fafbfd;margin-top:6px}
+.rewrite-variants{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.rewrite-var{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start;padding:10px;border:1px solid var(--line);border-radius:8px;background:#fff}
+.rewrite-var .strat{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--blue-dk)}
+.side-by-side{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px}
+.side-by-side .pane{padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:#fff;font-size:14px}
+.side-by-side .pane.orig{background:#fde8e8;border-color:#f2bcbc}
+.side-by-side .pane.fix{background:#e3f5ea;border-color:#b5e0c5}
+.side-by-side .lbl{font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-2);margin-bottom:4px}
+
+/* Submit method icons */
+.method{gap:10px}
+.method [role=tab]{gap:8px}
+
+/* Finding polish */
+.finding{transition:box-shadow .15s}
+.finding:hover{box-shadow:0 2px 10px rgba(15,31,61,.06)}
+.finding-top .chip{flex:none}
 
 @media (max-width:1100px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.cols{grid-template-columns:minmax(0,1fr)}.cols-3,.cols-2{grid-template-columns:minmax(0,1fr)}}
 @media (max-width:900px){
@@ -411,6 +494,8 @@ dialog.dlg h2{margin-bottom:8px;font-size:19px}
   .top{padding:0 16px}main{padding:20px 16px}
   .grid-2,.field-grid{grid-template-columns:minmax(0,1fr)}
   .who .name{display:none}
+  .radar-grid,.health-grid,.side-by-side,.claim-edge{grid-template-columns:minmax(0,1fr)}
+  .claim-arrow{display:none}
 }
 @media (max-width:640px){
   h1{font-size:24px}

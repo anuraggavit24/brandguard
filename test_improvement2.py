@@ -146,7 +146,7 @@ with TestClient(main.app) as a:
                files={"logo": ("logo.png", open(logo_path, "rb"), "image/png")})
     reg = json.loads(main.q("SELECT registry FROM brands WHERE id=?", (BID,))[0]["registry"])
     check("brand assets are saved with the logo", reg["assets"]["require_logo"] and os.path.exists(reg["assets"]["logo"]))
-    check("rules page shows the brand assets card", "Brand assets and accessibility" in a.get("/admin/rules").text)
+    check("rules page shows the brand assets card", "Brand assets" in a.get("/admin/rules").text)
     bad = a.post("/admin/assets", data={"min_contrast": "abc"})
     check("bad numbers are refused", "must be numbers" in bad.text)
     r = a.post("/admin/team/invite", data={"email": "d@x.test", "kind": "agency", "project_id": [str(car["id"])]})

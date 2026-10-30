@@ -170,10 +170,12 @@ def parse_value(ftype, raw):
 
 
 def _number(s):
+    import math
     try:
-        return float(str(s).replace(",", "").strip())
-    except (ValueError, TypeError):
+        v = float(str(s).replace(",", "").strip())
+    except (ValueError, TypeError, OverflowError):
         return None
+    return v if math.isfinite(v) and abs(v) < 1e15 else None    # no infinity, NaN or absurd sizes
 
 
 def parse_date(s):
