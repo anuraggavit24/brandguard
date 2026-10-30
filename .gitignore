@@ -14,3 +14,11 @@ groq_key.txt
 # demo clips for the judges page must be committed; the audio rules above would hide them
 !demo_audio/
 !demo_audio/*
+
+# local AI design tooling (not part of the app)
+.agent/
+.agents/
+.claude/
+.gemini/
+.codex/
+.impeccable/

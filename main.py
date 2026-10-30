@@ -18,6 +18,31 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
+
+def _load_dotenv(path=Path(__file__).with_name(".env")):
+    """Read KEY=value lines from .env next to this file (no extra package needed).
+    Settings already in the environment (Render, Docker, the start script) win."""
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        key = key.strip().removeprefix("export ").strip()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        elif " #" in val:
+            val = val.split(" #", 1)[0].rstrip()
+        if key and val and not os.environ.get(key):
+            os.environ[key] = val
+
+
+_load_dotenv()
+
 import requests
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
