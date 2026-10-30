@@ -502,7 +502,8 @@ def home(request: Request):
             '<p class="sample-copy">&ldquo;Book Demo Heights in Wakad, Pune: 2 BHK at 1.3 crore with '
             '<mark>guaranteed returns</mark>, hurry!&rdquo;</p>'
             f'<div class="sample-result"><div class="finding-top">{ui.badge("Rejected", "bad", "x-circle")}'
-            f'{ui.badge("1 claim to verify", "warn", "alert")}</div>'
+            f'{ui.badge("1 violation", "bad", "x-circle")}{ui.badge("1 to check", "warn", "alert")}'
+            f'{ui.badge("1 claim verified", "ok", "check-circle")}</div>'
             '<dl><dt>Detected</dt><dd>guaranteed returns</dd>'
             '<dt>Why it matters</dt><dd>It is on the banned-claims list.</dd>'
             '<dt>What to do</dt><dd>Remove or rephrase this claim.</dd></dl></div>'
@@ -647,7 +648,7 @@ def submit_form(request: Request):
              placeholder="e.g. Demo Heights 2 BHK offer poster with price and RERA">
       <p class="hint">If Brand Rules require alt text, leave this blank on an image and BrandGuard will flag it for accessibility.</p>
       {_sfx(company, 'file')}{_sfx(lang, 'file')}
-      <p data-busy hidden class="muted" role="status">Reviewing. On this free server it can take a few minutes. Please keep this page open.</p>
+      <p data-busy hidden class="muted" role="status">Reviewing. A video usually takes 1–3 minutes. Please keep this page open.</p>
       <button id="submit-file" class="btn" type="submit" data-busy-label="Reviewing...">Submit for Compliance Review</button>
     </form>"""
     if LINKS_ENABLED:
@@ -692,10 +693,10 @@ def submit_form(request: Request):
     body = (ui.page_header("Submit Content for Review",
                            "BrandGuard checks videos, posters, documents, pages and pasted copy against the brand's approved "
                            "facts and rules. Anything uncertain goes to a person for a decision.")
-            + ui.alert("Pasted copy is checked in seconds. Videos can take a few minutes on this free server.", "info")
+            + ui.alert("Pasted copy is checked in seconds. A video usually takes 1–3 minutes.", "info")
             + '<details class="muted note-disclosure"><summary>Why can a video take a few minutes?</summary>'
-              '<p>This demo runs on a free server with little CPU and memory. For a video, BrandGuard turns the speech into text and reads '
-              'every frame. The first request after a quiet period is slower still while the server wakes up. Keep the page open until '
+              '<p>For a video, BrandGuard turns the speech into text and reads the text on screen frame by frame, then checks '
+              'every claim. Keep the page open until '
               'the result appears. Short videos (under 15 seconds) are quickest.</p></details>'
             + '<div class="cols"><div>'
             + ui.card("", f"""
@@ -1975,9 +1976,15 @@ def view_submission(request: Request, sid: int):
     meta = rep.get("screen_meta")
     if meta is not None:
         if scr_lines:
+            timed = ckind == "video"
+            def _conf(l):
+                c = l.get("conf")
+                if not isinstance(c, (int, float)) or (ckind not in ("video", "image") and c >= 0.995):
+                    return '<span class="muted conf"></span>'
+                return f'<span class="muted conf">{round(c * 100)}%</span>'
             srows = "".join(
-                f'<div class="tr-row"><time>{fmt_time(l["start"])}</time><span{lang_attr(l.get("raw") or l["text"], rep)}>{e(l.get("raw") or l["text"])}</span>'
-                f'<span class="muted conf">{round(l["conf"] * 100)}%</span></div>' for l in scr_lines)
+                f'<div class="tr-row"><time>{fmt_time(l["start"]) if timed else ""}</time><span{lang_attr(l.get("raw") or l["text"], rep)}>{e(l.get("raw") or l["text"])}</span>'
+                f'{_conf(l)}</div>' for l in scr_lines)
         else:
             srows = ui.empty("No text was found on screen")
         if ckind == "video":
@@ -1985,9 +1992,11 @@ def view_submission(request: Request, sid: int):
                                   f'<p class="muted">{meta["frames"]} frames read (2 per second plus every scene change). '
                                   f'Each line is shown once, at the first time it appeared.</p>{srows}')
         else:
+            note_ = ('Each line that was read and checked, with OCR confidence. A price on its own line is joined '
+                     'with the label above it, so it is checked against the right variant.' if ckind == "image"
+                     else "Each line that was checked.")
             transcript += ui.card("Text read from the image" if ckind == "image" else "Text of the document",
-                                  '<p class="muted">Each line that was checked. On posters, a price on its own line is joined '
-                                  'with the label above it, so it is checked against the right variant.</p>' + srows)
+                                  f'<p class="muted">{note_}</p>' + srows)
 
     cleared = rep.get("cleared") or []
     if cleared:
@@ -5603,7 +5612,7 @@ TEST_CLIPS = [
      "result": "Auto-Approved. The price, carpet area, bathrooms and possession all match the approved facts, so an "
                "approval ID is issued with no human needed.",
      "steps": ["Download the file below.", "Click Enter as Freelancer on the home page.",
-               "Open Submit a Video, choose Demo Developer, and upload the file.",
+               "Open Submit Content, choose Demo Developer, and upload the file.",
                "The result page opens. Look at the Claim-by-claim checks table: each spoken claim is matched to an approved fact."]},
     {"key": "rejection", "n": 2, "title": "Rejection test",
      "say": "Demo Heights in Wakad. 2 BHK for 1 crore 30 lakh. Guaranteed returns, the price will double in two years. "
@@ -5611,14 +5620,14 @@ TEST_CLIPS = [
      "result": "Rejected. The price is correct, but \"guaranteed returns\" and \"price will double\" are banned phrases "
                "(\"last chance\" is also flagged if the sample brand guide has been imported). Each finding shows the "
                "exact second it appeared, whether it was spoken or shown on screen, why it matters and what to change.",
-     "steps": ["Download the file below.", "Enter as Freelancer and open Submit a Video.",
+     "steps": ["Download the file below.", "Enter as Freelancer and open Submit Content.",
                "Choose Demo Developer and upload the file.",
                "Read the findings on the result page. The creator is told exactly what to fix."]},
     {"key": "dispute", "n": 3, "title": "Dispute test",
      "say": "Demo Heights, Wakad. 3 BHK flats available at 1 crore 50 lakh. Possession in December 2028.",
      "result": "Rejected, because 3 BHK is approved at 1 crore 90 lakh, not 1 crore 50 lakh. You then dispute it and "
                "play the builder to resolve it. This shows that a person always has the final word.",
-     "steps": ["Download the file below, then Enter as Freelancer, open Submit a Video, choose Demo Developer and upload it.",
+     "steps": ["Download the file below, then Enter as Freelancer, open Submit Content, choose Demo Developer and upload it.",
                "The submission is Rejected for a price mismatch. Click Raise a dispute.",
                "Write why the finding is wrong (for example: \"I quoted the offer price for a limited floor\"). "
                "Optionally type what you actually said. Click Submit dispute. The status becomes Disputed.",
@@ -5633,8 +5642,8 @@ TEST_CLIPS = [
                "Done, and the card \"Text read from the screen\" lists what appeared in the video, such as the price "
                "(₹1,30,00,000), carpet area, bathrooms and possession date, each with its time. The on-screen price is "
                "compared with the approved price and with the price spoken in the video.",
-     "steps": ["Download the video below.", "Click Enter as Freelancer, open Submit a Video, choose Demo Developer and upload it.",
-               "Wait for the review. On the free server this takes a while (see the note at the top of this page).",
+     "steps": ["Download the video below.", "Click Enter as Freelancer, open Submit Content, choose Demo Developer and upload it.",
+               "Wait for the review. A video usually takes 1–3 minutes.",
                "On the result page, open the \"Text read from the screen\" card and the \"On-screen text\" and "
                "\"Voice versus screen\" checks."]},
 ]

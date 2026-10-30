@@ -16,7 +16,7 @@ The home page has three demo roles. They are fictional sample accounts, separate
 | Journey | Steps | What you should see |
 |---|---|---|
 | **1. A creator's content is checked** | Enter as **Channel Partner** → **Submit Content** → **Paste copy** → paste `Book Demo Heights in Wakad, Pune: 2 BHK at 1.3 crore with guaranteed returns, hurry!` → submit | **Rejected.** Each finding says where it is, why it matters and what to change; the price is verified against the approved fact; a Risk Radar summarises the problems. |
-| **2. A video in Marathi** | Open **Demo Files** (home page) → download a clip → as Channel Partner upload it under **Submit Content** | Speech is transcribed, text on screen is read, every price and fact is checked. A short clip takes 1–3 minutes on the free server. |
+| **2. A video in Marathi** | Open **Demo Files** (home page) → download a clip → as Channel Partner upload it under **Submit Content** | Speech is transcribed, text on screen is read, every price and fact is checked. A short clip takes 1–3 minutes. |
 | **3. The company side** | Enter as **Builder** → **Review Queue** → open an item → approve or reject with a note → **Compliance Insights** | The decision is recorded in the audit trail; insights show repeated mistakes and rules that are often disputed. |
 
 To set up a real company: **Create company account** on the home page. A guided tour and a "Get started" checklist walk you through brand rules, products and facts (spreadsheet, brochure or sample data), and inviting your team.
@@ -164,7 +164,7 @@ Stated plainly so nobody is misled.
 - **AI on Hindi and Marathi** is weaker than on English; it only ever advises or sends to a person.
 - **Visual checks are limited** to logo, colours, contrast and text size. Fonts and layout are not identified.
 - **RERA numbers are format-checked**, not looked up on the state register (no stable public API).
-- **Single process and SQLite** — right for a pilot; production would use a managed database and job queue. On Render's free plan the server sleeps and data resets on redeploy.
+- **Single process and SQLite** — right for a pilot; videos are reviewed one at a time. The live site runs on Render Starter with a persistent disk, so it does not sleep and data survives redeploys. Production at scale would use a managed database and several workers.
 - **Link download** (YouTube / Instagram) works from a local machine only; cloud IPs are blocked by those sites.
 
 ## Repository layout

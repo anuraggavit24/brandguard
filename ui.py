@@ -897,7 +897,7 @@ def shell(title, body, user, role_label, active="", crumbs=None, queue_count=0,
         f'<a href="/enter/{k}"{" class=cur" if current else ""}>{icon("users", 16)}{e(lbl)}</a>'
         for k, lbl, current in demo_users)
     if demo:
-        demo = f'<details class="demo-switch"><summary>Switch demo role</summary>{demo}</details>'
+        demo = f'<details class="demo-switch" open><summary>Switch demo role</summary>{demo}</details>'
 
     home = "Overview" if is_admin else "My Dashboard"
     trail = [(home, "/")] + list(crumbs or [])
