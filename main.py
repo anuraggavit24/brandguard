@@ -5655,6 +5655,22 @@ TEST_CLIPS = [
                "Wait for the review. A video usually takes 1–3 minutes.",
                "On the result page, open the \"Text read from the screen\" card and the \"On-screen text\" and "
                "\"Voice versus screen\" checks."]},
+    {"key": "promo_approve", "file": "promo_approve", "n": 5, "title": "Promo video that should be approved",
+     "say": "Welcome to Demo Heights in Wakad, Pune. Our 2 BHK homes are priced at 1 crore 30 lakh. Carpet area 720 "
+            "square feet, with 2 bathrooms. Possession in December 2028.",
+     "result": "Auto-Approved. The spoken and on-screen price, carpet area, bathrooms and possession all match the "
+               "approved facts of Demo Heights, so an approval ID is issued.",
+     "steps": ["Download the video below.", "Enter as Channel Partner, open Submit Content, choose Demo Developer and upload it.",
+               "Wait for the review. A video usually takes 1–3 minutes.",
+               "Open Claim-by-claim checks: every claim is matched to an approved fact."]},
+    {"key": "promo_reject", "file": "promo_reject", "n": 6, "title": "Promo video that should be rejected",
+     "say": "Demo Heights in Wakad! Spacious 3 BHK flats for just 1 crore 50 lakh! Guaranteed returns, the price will "
+            "double in two years! Hurry, last chance, book today!",
+     "result": "Rejected. 3 BHK is approved at 1 crore 90 lakh, not 1 crore 50 lakh, and \"guaranteed returns\" and "
+               "\"price will double\" are banned phrases. \"Hurry\" and \"last chance\" are flagged as urgency claims.",
+     "steps": ["Download the video below.", "Enter as Channel Partner, open Submit Content, choose Demo Developer and upload it.",
+               "Wait for the review. A video usually takes 1–3 minutes.",
+               "Read the findings: each one shows the second it was said or shown, why it matters and what to change."]},
 ]
 
 
