@@ -5658,6 +5658,93 @@ TEST_CLIPS = [
 ]
 
 
+DEMO_POSTERS = [
+    ("Poster_1_Approve_Demo_Heights_2BHK.png", "Poster 1: should be approved",
+     "Demo Heights 2 BHK at Rs 1.30 Cr, 720 sq ft, 2 bathrooms, possession December 2028. Every fact matches.",
+     "Auto-Approved, with an approval ID."),
+    ("Poster_2_Reject_Wrong_Price_3BHK.png", "Poster 2: wrong price",
+     "Demo Heights 3 BHK at Rs 1.50 Cr. The approved 3 BHK price is Rs 1.90 Cr.",
+     "Rejected: price mismatch. Area, bathrooms, possession and RERA are verified."),
+    ("Poster_3_Reject_Banned_Phrases_Villas.png", "Poster 3: banned phrases",
+     "Demo Greens Villas 4 BHK at Rs 4.10 Cr with \"Guaranteed returns! Price will double in 2 years\".",
+     "Rejected: two banned phrases. The price is verified."),
+    ("Poster_4_Check_Confidential_And_Low_Contrast.png", "Poster 4: confidential term in faint text",
+     "A correct poster with a faint line \"Channel partners earn 2% dealer commission\".",
+     "Blocked: a confidential term is shown publicly."),
+    ("Banner_5_Reject_Expired_Offer_And_Urgency.png", "Banner 5: expired offer",
+     "Wide banner with \"Zero GST on all bookings\". That offer ended on 30 September 2026.",
+     "Rejected: expired offer. Price and RERA are verified."),
+    ("Banner_6_Approve_Booking_Offer.png", "Banner 6: should be approved",
+     "Wide banner with the 2 BHK price and the Rs 5 lakh booking amount.",
+     "Auto-Approved: price, booking amount and RERA all match."),
+]
+DEMO_SHEETS = [
+    ("BrandGuard_Import_Bank.xlsx", "Bank (Deccan Trust Bank)",
+     "Home, personal and car loans, fixed deposits and credit cards: interest rate, processing fee, cashback, annual fee.",
+     "Deccan Home Loan for salaried at just 7.9% interest, processing fee only ₹10,000!",
+     "Rejected: the approved interest rate is 8.5%."),
+    ("BrandGuard_Import_Food.xlsx", "Food (Tiffin Tree Foods)",
+     "Oats, cookies, peanut butter and poha: price, discount, pack size, protein, added sugar, free gifts.",
+     "Tiffin Tree Masala Oats Classic Masala now 25% off!",
+     "Rejected: the highest approved discount is 10%."),
+    ("BrandGuard_Import_EV_Scooter.xlsx", "Electric scooters (Zephyr Motors)",
+     "Three scooters and their versions: price, discount, range, top speed, battery warranty, delivery date.",
+     "Zephyr Spark City at ₹69,999, top speed 55 km/h.",
+     "Rejected: the approved price is ₹74,999. The top speed is verified."),
+]
+_DEMO_ASSETS = {n for n, *_ in DEMO_POSTERS} | {n for n, *_ in DEMO_SHEETS}
+
+
+@app.get("/test-audio/asset/{name}")
+def test_audio_asset(name: str, inline: int = 0):
+    if name not in _DEMO_ASSETS:
+        return HTMLResponse("File not found.", status_code=404)
+    p = AUDIO_DIR / name
+    if not p.is_file():
+        return HTMLResponse("File not found.", status_code=404)
+    return FileResponse(str(p), filename=name, content_disposition_type="inline" if inline else "attachment")
+
+
+def demo_assets_html():
+    cards = []
+    pitems = []
+    for name, title, shows, expect in DEMO_POSTERS:
+        if not (AUDIO_DIR / name).is_file():
+            continue
+        pitems.append(
+            f'<div class="card" style="padding:14px"><img src="/test-audio/asset/{name}?inline=1" alt="{e(title)}: {e(shows)}" '
+            f'loading="lazy" style="width:100%;border-radius:8px;border:1px solid var(--line, #ddd)">'
+            f'<h3 style="margin:10px 0 4px;font-size:16px">{e(title)}</h3><p class="muted u-m0">{e(shows)}</p>'
+            f'<p class="u-m0" style="margin-top:6px"><b>Expected:</b> {e(expect)}</p>'
+            f'<a class="btn secondary sm" style="margin-top:10px" href="/test-audio/asset/{name}" download>Download</a></div>')
+    if pitems:
+        cards.append(ui.card(
+            "Posters and banners (Demo Developer)",
+            '<ol class="u-list u-mb12"><li>Download a poster.</li><li>Enter as Channel Partner or Freelancer, open '
+            '<b>Submit Content</b>, choose Demo Developer and upload it.</li><li>Type a short <b>image description</b>: '
+            'the demo company requires one for accessibility. Without it, the poster goes to a person instead of being '
+            'approved.</li><li>The result appears in a few seconds. Open <b>Text read from the image</b> to see what was read.</li></ol>'
+            '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px">' + "".join(pitems) + '</div>'))
+    sitems = []
+    for name, title, covers, caption, expect in DEMO_SHEETS:
+        if not (AUDIO_DIR / name).is_file():
+            continue
+        sitems.append(f'<tr><td><b>{e(title)}</b><br><span class="muted">{e(covers)}</span></td>'
+                      f'<td><code>{e(caption)}</code><br><span class="muted">{e(expect)}</span></td>'
+                      f'<td><a class="btn secondary sm" href="/test-audio/asset/{name}" download>Download .xlsx</a></td></tr>')
+    if sitems:
+        cards.append(ui.card(
+            "Any industry: ready-made spreadsheets",
+            '<ol class="u-list u-mb12"><li>On the home page click <b>Create company account</b> and choose any industry.</li>'
+            '<li>Open <b>Products and Facts → Import</b>, upload one sheet, check the rows and click <b>Apply</b>.</li>'
+            '<li>In <b>Team and Invites</b>, invite a second email address of yours as a channel partner (a one-time code is '
+            'emailed to you first). Open the invite link in a private window and set a password.</li>'
+            '<li>As that partner, paste the test caption under <b>Submit Content → Paste copy</b>.</li></ol>'
+            '<div class="table-wrap"><table class="table"><thead><tr><th>Company (fictional)</th><th>Test caption and expected result</th>'
+            '<th></th></tr></thead><tbody>' + "".join(sitems) + '</tbody></table></div>'))
+    return "".join(cards)
+
+
 def _clip_file(key):
     clip = next((c for c in TEST_CLIPS if c["key"] == key), None)
     base = clip.get("file", key) if clip else key
@@ -5702,19 +5789,17 @@ def test_audio_page(request: Request):
     start = ('<a class="btn" href="/enter/freelancer">Enter as Freelancer</a> '
              '<a class="btn secondary" href="/enter/admin">Enter as Builder</a>') if not u else ""
     body = (ui.page_header("Demo Files for Judges",
-                           "Ready-made demo recordings and a demo video to test the main workflow: one approved, one rejected, "
-                           "one disputed, and one that shows on-screen text being read. No sign-up is needed. Use the demo "
+                           "Ready-made recordings, a video, posters, banners and spreadsheets to test the main workflow: approved, "
+                           "rejected, disputed, on-screen text, and companies from other industries. No sign-up is needed. Use the demo "
                            "roles in the sidebar or the buttons below.", start)
             + '<div class="stack">'
-            + ui.alert("These files are made for demonstration only. Download a file here, then upload it on the Submit a "
-                       "Video page to see how BrandGuard reviews it. The company, projects and prices are fictional.",
+            + ui.alert("These files are made for demonstration only. Download a file here, then upload it on the Submit "
+                       "Content page to see how BrandGuard reviews it. The company, projects and prices are fictional.",
                        "info", "For demo use.")
-            + ui.alert("This demo runs on a free Render server, which has very little CPU and memory. A review needs speech "
-                       "recognition plus reading every frame of the video, so it can take a few minutes, and the first "
-                       "request after a quiet period is slower because the server has to wake up. Please keep the page open "
-                       "and wait. The same review takes seconds on a normal server.",
-                       "warn", "Please be patient.")
-            + "".join(cards) + extra + "</div>")
+            + ui.alert("A video review needs speech recognition plus reading the text on screen, so it usually takes "
+                       "1–3 minutes. Posters and pasted copy take a few seconds. Please keep the page open until the result appears.",
+                       "info", "How long it takes.")
+            + "".join(cards) + demo_assets_html() + extra + "</div>")
     if u:
         return page("Demo Files", body, u, "testaudio", [("Demo Files", None)], request)
     return page("Demo Files", body)

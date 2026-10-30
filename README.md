@@ -17,7 +17,9 @@ The home page has three demo roles. They are fictional sample accounts, separate
 |---|---|---|
 | **1. A creator's content is checked** | Enter as **Channel Partner** → **Submit Content** → **Paste copy** → paste `Book Demo Heights in Wakad, Pune: 2 BHK at 1.3 crore with guaranteed returns, hurry!` → submit | **Rejected.** Each finding says where it is, why it matters and what to change; the price is verified against the approved fact; a Risk Radar summarises the problems. |
 | **2. A video in Marathi** | Open **Demo Files** (home page) → download a clip → as Channel Partner upload it under **Submit Content** | Speech is transcribed, text on screen is read, every price and fact is checked. A short clip takes 1–3 minutes. |
-| **3. The company side** | Enter as **Builder** → **Review Queue** → open an item → approve or reject with a note → **Compliance Insights** | The decision is recorded in the audit trail; insights show repeated mistakes and rules that are often disputed. |
+| **3. Posters and banners** | **Demo Files** → download a poster → as Channel Partner upload it under **Submit Content**, with a short image description | Six ready-made posters and banners: two are approved; the others show a wrong price, banned phrases, a confidential term and an expired offer. Each takes a few seconds. |
+| **4. The company side** | Enter as **Builder** → **Review Queue** → open an item → approve or reject with a note → **Compliance Insights** | The decision is recorded in the audit trail; insights show repeated mistakes and rules that are often disputed. |
+| **5. Any industry** | **Demo Files** → download the bank, food or EV-scooter spreadsheet → **Create company account** → **Products and Facts → Import** → invite a partner → paste the test caption shown next to the sheet | The company's own facts (interest rate, discount, range, cashback…) are checked. Each sheet lists a caption and the result to expect. |
 
 To set up a real company: **Create company account** on the home page. A guided tour and a "Get started" checklist walk you through brand rules, products and facts (spreadsheet, brochure or sample data), and inviting your team.
 
@@ -151,7 +153,9 @@ python test_brandguard.py            # end-to-end workflow
 | `test_accounts.py` · `test_onboarding.py` · `test_invites_bulk.py` · `test_safety.py` | 36 · 13 · 14 · 35 | Sign-up, login, invites, tour and checklist, bulk invites, OTP, password reset, rate limits, notifications |
 | `test_queue.py` · `test_cleanup.py` | 28 · 10 | Bulk queue and restart recovery; upload clean-up, menu labels |
 
-**519 automated checks** (494 in the test files + 25 in the engine self-test), all passing on Python 3.11. Speech and the AI are replaced by scripted answers in tests, so results do not depend on a network. Manual testing on the live site used real Marathi, Hindi and English clips, posters and documents.
+**519 automated checks** (494 in the test files + 25 in the engine self-test), all passing on Python 3.11. Speech and the AI are replaced by scripted answers in tests, so results do not depend on a network.
+
+**Manual testing on the live site:** 50 real test items were reviewed by hand against the expected result; **38 of 50 (76%) were correct.** The demo posters, banners and the three industry spreadsheets in `demo_audio/` were also run through the full review pipeline, and every one gives the result listed on the Demo Files page.
 
 ---
 
@@ -159,7 +163,7 @@ python test_brandguard.py            # end-to-end workflow
 
 Stated plainly so nobody is misled.
 
-- **Accuracy on real content has not been measured on a labelled set.** Tests use scripted transcripts; real clips were checked by hand.
+- **Accuracy on real content is only measured on a small set:** 38 of 50 hand-checked items (76%). A larger labelled set is the first roadmap item.
 - **Speech-to-text and OCR make mistakes.** Prices are re-checked by code and low confidence goes to a person, but stylised or fast text on screen can be missed.
 - **AI on Hindi and Marathi** is weaker than on English; it only ever advises or sends to a person.
 - **Visual checks are limited** to logo, colours, contrast and text size. Fonts and layout are not identified.
@@ -175,7 +179,7 @@ ocr.py  formats.py  assets.py  governance.py  packs.py  importer.py
 ai_review.py  rewrite.py  learning.py  llm.py
 accounts.py  mailer.py  ratelimit.py  jobs.py
 test_*.py            automated checks (see Testing)
-demo_audio/          demo clips for judges
+demo_audio/          demo clips, posters, banners and industry spreadsheets for judges (served on the Demo Files page)
 Dockerfile  requirements.txt  .env.example  start_brandguard.bat
 SOLUTION.md          design rationale and how it maps to the problem statement
 ```
