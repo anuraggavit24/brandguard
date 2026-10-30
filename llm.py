@@ -60,7 +60,7 @@ def _post(model, system, user, temperature, json_mode, timeout):
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
     if json_mode:
         body["response_format"] = {"type": "json_object"}
-    return requests.post(URL, headers={"Authorization": f"Bearer {os.environ.get('GROQ_API_KEY', '')}"},
+    return requests.post(URL, headers={"Authorization": f"Bearer {os.environ.get('GROQ_API_KEY', '').strip().strip(chr(34)).strip(chr(39))}"},
                          json=body, timeout=timeout)
 
 

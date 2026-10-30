@@ -49,7 +49,7 @@ UNITS.setdefault("l", LAKH)
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
 UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "brandguard.db"
-GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_KEY = os.environ.get("GROQ_API_KEY", "").strip().strip('"').strip("'")
 MODE = os.environ.get("TRANSCRIBE_MODE", "groq")  # groq | local
 LINKS_ENABLED = os.environ.get("LINKS_ENABLED", "1") == "1"
 MAX_MB = 60
@@ -760,6 +760,13 @@ def transcribe_groq(wav: Path, lang: str, glossary):
         r = requests.post("https://api.groq.com/openai/v1/audio/transcriptions",
                           headers={"Authorization": f"Bearer {GROQ_KEY}"},
                           files={"file": ("audio.wav", f)}, data=data, timeout=120)
+    if r.status_code in (401, 403):
+        raise RuntimeError("The speech service did not accept this server's API key (error "
+                           f"{r.status_code}). The site owner needs to replace GROQ_API_KEY in the server "
+                           "settings. Pasted copy, documents and posters still work.")
+    if r.status_code == 429:
+        raise RuntimeError("The speech service is busy or its free daily limit is used up (error 429). "
+                           "Try again in a few minutes.")
     if r.status_code != 200:
         raise RuntimeError(f"The speech service returned an error ({r.status_code}). Please try again.")
     j = r.json()
