@@ -254,7 +254,7 @@ def number_with_unit(text, units):
     out = []
     t = text or ""
     for u in sorted(units, key=len, reverse=True):
-        pat = r"(?<![\d.])(\d+(?:[.,]\d+)?)\s*" + re.escape(u) + (r"(?!\w)" if u.isascii() else "")
+        pat = r"(?<![\d.])(\d+(?:[.,]\d+)?)\s*" + re.escape(u) + (r"(?![\w/])" if u.isascii() else "")
         for m in re.finditer(pat, t, re.I):
             v = _number(m.group(1).replace(",", "."))
             if v is not None and not any(abs(v - o[0]) < 1e-9 and o[1] == m.group(0) for o in out):
@@ -292,6 +292,10 @@ def _fmt(d, v):
     if d["ftype"] == "percent":
         return f"{v:g}%"
     if d["ftype"] == "money":
+        if abs(v) >= 1e7:
+            return f"₹{v / 1e7:g} Cr"
+        if abs(v) >= 1e5:
+            return f"₹{v / 1e5:g} Lakh"
         return "₹" + f"{v:,.0f}"
     if d["ftype"] == "number":
         return f"{v:g} {d['units'][0] if d['units'] else ''}".strip()
@@ -299,6 +303,11 @@ def _fmt(d, v):
 
 
 # ------------------------------------------------------------------ the check
+def _clauses(text):
+    """Split at commas (not inside numbers), sentence ends and joining words."""
+    return [c for c in re.split(r",(?!\d)|[;!?\n]|\.(?=\s|$)|\b(?:and|with|plus|aur|आणि|और)\b|\|", text or "") if c.strip()]
+
+
 def check(project, defs, text, t, src, conf, used, RE):
     """Claims about a company's own fact types in one piece of text.
     Returns (claims, consumed) where consumed are money values already explained by a money fact (so the price check
@@ -310,6 +319,13 @@ def check(project, defs, text, t, src, conf, used, RE):
     used_pct = set()
     variants = RE.unit_types(project["id"])
     named = [v for v in variants if mentions(tf, v["label"])]
+    # two number facts that share a unit (pack size and protein, both in g): a bare "39 g" could be either,
+    # so for those the content must also name the fact
+    unit_count = {}
+    for d in defs:
+        if d["ftype"] == "number":
+            for u in {x.lower() for x in d["units"]}:
+                unit_count[u] = unit_count.get(u, 0) + 1
     for d in defs:
         rows = RE._q("SELECT * FROM facts WHERE project_id=? AND key=? ORDER BY id", (project["id"], d["key"]))
         cur = [f for f in rows if RE._is_current(f)]
@@ -319,13 +335,25 @@ def check(project, defs, text, t, src, conf, used, RE):
             scoped = [f for f in cur if f["unit_type_id"] is None] or cur
         label_hit = any(mentions(tf, n) for n in names_of(d))
         heard = []                        # (value, spoken)
-        if d["ftype"] == "percent" and label_hit:
-            heard = [(p["value"], p["spoken"]) for p in pct]
-            used_pct.update(p["value"] for p in pct)
-        elif d["ftype"] == "money" and label_hit:
-            heard = [(float(m["value"]), m["spoken"]) for m in money]
+        if d["ftype"] in ("percent", "money") and label_hit:
+            # several percentages or amounts in one text: each belongs to the fact named in the same clause
+            near = []
+            for cl in _clauses(text):
+                if any(mentions(fold(cl), n) for n in names_of(d)):
+                    near += (amounts.extract_percents(cl) if d["ftype"] == "percent" else amounts.extract_amounts(cl))
+            rivals = sum(1 for o in defs if o is not d and o["ftype"] == d["ftype"]
+                         and any(mentions(tf, n) for n in names_of(o)))
+            found = near if (near or rivals) else (pct if d["ftype"] == "percent" else money)
+            if d["ftype"] == "percent":
+                heard = [(p["value"], p["spoken"]) for p in found]
+                used_pct.update(p["value"] for p in found)
+            else:
+                heard = [(float(m["value"]), m["spoken"]) for m in found]
         elif d["ftype"] == "number":
-            heard = number_with_unit(text, d["units"])
+            shared = any(unit_count.get(u.lower(), 0) > 1 for u in d["units"])
+            heard = number_with_unit(text, d["units"]) if (label_hit or not shared) else []
+            # "3 years" inside a variant name ("Fixed Deposit 3 years") names the variant, it is not a claim
+            heard = [h for h in heard if not any(fold(h[1]) in fold(v["label"]) for v in named)]
         elif d["ftype"] == "date" and label_hit:
             heard = find_dates(text)
         elif d["ftype"] in ("yes_no", "text") and label_hit:

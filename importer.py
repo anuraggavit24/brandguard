@@ -140,6 +140,47 @@ def split_header(h):
     return (m.group(1) or "").strip(), (m.group(2) or "").strip()
 
 
+# Words people actually say for common fact types, so an imported column is found in speech and captions
+# without the company typing aliases. Matched on the column name; first match wins.
+KNOWN_WORDS = [
+    (("processing fee", "processing charge"), "processing charges, processing charge, प्रोसेसिंग फी, प्रोसेसिंग शुल्क"),
+    (("annual fee", "joining fee"), "yearly fee, annual charges, वार्षिक शुल्क, वार्षिक फी"),
+    (("cashback",), "cash back, कॅशबॅक, कैशबैक"),
+    (("discount",), "off, discount, सूट, सवलत, डिस्काउंट, छूट"),
+    (("deposit", "yield", "fd rate", "return"), "earn, returns, yield, FD rate, परतावा, रिटर्न"),
+    (("interest",), "interest, rate of interest, ब्याज, ब्याज दर, व्याज, व्याजदर"),
+    (("emi",), "EMI, monthly instalment, हप्ता, किस्त"),
+    (("loan amount", "loan up to"), "loan up to, loan of, loan amount, loans up to"),
+    (("tenure",), "tenure, repay over, कालावधी, अवधि"),
+    (("warranty", "guarantee"), "warranty, guarantee, वॉरंटी, गॅरंटी"),
+    (("range",), "range, per charge, single charge, रेंज"),
+    (("top speed", "speed"), "top speed, speed, max speed, स्पीड, वेग"),
+    (("charging",), "charging, full charge, चार्जिंग"),
+    (("mileage",), "mileage, average, मायलेज"),
+    (("delivery",), "delivery, deliver, डिलिव्हरी, डिलीवरी"),
+    (("protein",), "protein, प्रोटीन"),
+    (("pack size", "net weight", "pack"), "pack, net weight, नेट वजन"),
+    (("shelf life", "best before"), "shelf life, best before, expiry"),
+    (("added sugar", "sugar"), "added sugar, sugar, साखर, चीनी, शुगर"),
+    (("gift", "free"), "free, gift, मोफत, फ्री"),
+]
+UNIT_WORDS = {
+    "years": "years, year, yrs, yr, वर्ष, वर्षे, साल", "year": "years, year, yrs, yr, वर्ष, वर्षे, साल",
+    "months": "months, month, महिने, महीने", "km": "km, kms, kilometres, kilometers, किमी",
+    "km/h": "km/h, kmph, km per hour, किमी प्रति तास", "hours": "hours, hour, hrs, hr, तास, घंटे",
+    "g": "g, gm, gms, grams, gram, ग्राम", "kg": "kg, kgs, kilo, किलो", "ml": "ml, millilitre", "kmpl": "kmpl, km/l, km per litre",
+}
+
+
+def known_words(label):
+    low = label.lower()
+    return next((w for keys, w in KNOWN_WORDS if any(k in low for k in keys)), "")
+
+
+def unit_words(unit):
+    return UNIT_WORDS.get(unit.strip().lower(), unit)
+
+
 def infer(label, unit, values):
     """Type and rule of a column the company added, from its name, its unit and its values."""
     low, u = label.lower(), unit.lower()
@@ -206,7 +247,9 @@ def parse_simple(rows):
         vals = [(r.get(h) or "").strip() for r in rows]
         if any(vals):
             ftype, unit2, direction = infer(label, unit, vals)
-            prop["fact_types"].append({"label": label, "ftype": ftype, "unit": unit2, "aliases": "", "direction": direction})
+            prop["fact_types"].append({"label": label, "ftype": ftype,
+                                       "unit": unit_words(unit2) if ftype == "number" else unit2,
+                                       "aliases": known_words(label), "direction": direction})
     return prop
 
 

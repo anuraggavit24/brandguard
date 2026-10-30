@@ -150,7 +150,7 @@ with TestClient(main.app) as a:
     texts = {x["text"]: x for x in dat["rows"]}
     check("preview lists rows and the problems", "Quick Scooter" in prev and any(not x["ok"] for x in dat["rows"]))
     check("a new column with a unit becomes a number fact type", any(x["kind"] == "fact_type" and x["data"]["label"] == "Mileage"
-          and x["data"]["ftype"] == "number" and x["data"]["unit"] == "kmpl" and x["data"]["direction"] == "max" for x in dat["rows"]))
+          and x["data"]["ftype"] == "number" and "kmpl" in [u.strip() for u in x["data"]["unit"].split(",")] and x["data"]["direction"] == "max" for x in dat["rows"]))
     check("a bad value is marked, not saved", not texts["Quick Scooter / Pro: Discount = abc"]["ok"])
     check("nothing is saved before confirming", not any(x["official_name"] == "Quick Scooter" for x in RE.brand_projects(BID)))
     good = [str(x["id"]) for x in dat["rows"] if x["ok"]]

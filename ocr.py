@@ -128,7 +128,7 @@ def normalise(text):
     t = _AMOUNT.sub(money, text)
     t = re.sub(r"(?i)(\d(?:\.\d+)?)\s*(?:L|Lac|Lacs)\b", r"\1 lakh", t)
     t = re.sub(r"(?i)(\d(?:\.\d+)?)\s*Cr\.?(?=\W|$)", r"\1 cr", t)
-    return t.replace("₹", " ").replace("¥", " ").replace("Rs.", " rs ").replace("Rs ", " rs ")
+    return t.replace("₹", " rs ").replace("¥", " ").replace("Rs.", " rs ").replace("Rs ", " rs ")
 
 
 def read_screen(src, max_seconds=180):

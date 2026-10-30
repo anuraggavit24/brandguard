@@ -3253,11 +3253,18 @@ def project_detail(request: Request, pid: int):
                 + "</div>")
     else:
         variant_form = (f'<form method="post" action="/admin/projects/{pid}/unit" data-lock><input type="hidden" name="category" value="product">'
-                        f'<div class="field-grid"><div><label for="vl">Variant name</label><input id="vl" name="label" required '
-                        f'placeholder="e.g. VXi, 500 g pack, Gold plan"></div>'
-                        f'<div><label for="vp">Price (optional)</label><input id="vp" name="price" placeholder="e.g. 9,470 or 8.5 lakh"></div>'
-                        f'<div><label for="vs">Source document</label><input id="vs" name="source" placeholder="e.g. Price list Nov 2026"></div></div>'
-                        f'<button class="btn" type="submit">{ui.icon("plus", 16)}Add variant</button></form>')
+                        f'<div class="field-grid"><div><label for="vl">Version name</label><input id="vl" name="label" required '
+                        f'placeholder="e.g. VXi, 500 g pack, Gold plan" aria-describedby="vl-h">'
+                        f'<p class="muted" id="vl-h" style="font-size:13px;margin-top:4px">Write it the way creators say it, so BrandGuard '
+                        f'can tell which version the content is about.</p></div>'
+                        f'<div><label for="vp">Approved price (optional)</label><input id="vp" name="price" placeholder="e.g. 9,470 or 8.5 lakh" aria-describedby="vp-h">'
+                        f'<p class="muted" id="vp-h" style="font-size:13px;margin-top:4px">Leave empty if this version has no price, '
+                        f'like a loan or a deposit. Any other price said for it is flagged.</p></div>'
+                        f'<div><label for="vs">Where the price comes from (optional)</label><input id="vs" name="source" '
+                        f'placeholder="e.g. Price list, November 2026" aria-describedby="vs-h">'
+                        f'<p class="muted" id="vs-h" style="font-size:13px;margin-top:4px">Shown next to every check against this price, '
+                        f'so a reviewer can trace it.</p></div></div>'
+                        f'<button class="btn" type="submit">{ui.icon("plus", 16)}Add this version</button></form>')
         body = (ui.page_header(p["official_name"], "Product, its variants and the approved facts content is checked against.",
                                '<a class="btn secondary" href="/admin/projects">All products</a>')
                 + '<div class="stack">'
@@ -3265,7 +3272,9 @@ def project_detail(request: Request, pid: int):
                 + gcard
                 + (ui.card("Other product-wide facts", ui.table(heads, proj_facts, "Product facts")) if proj_facts else "")
                 + units_html
-                + ui.card("Add a variant", variant_form, "A model, plan, size or pack. Give each one its own price if it has one.")
+                + ui.card("Add a version (variant)", variant_form,
+                          "Only needed when this product comes in versions with different prices or facts: car models (VXi, ZXi), "
+                          "pack sizes (200 g, 500 g) or plans (Silver, Gold). One version only? You can skip this.")
                 + "</div>")
     crumb = "Projects and Facts" if prop else "Products and Facts"
     return page(p["official_name"], body, u, "facts", [(crumb, "/admin/projects"), (p["official_name"], None)], request)
