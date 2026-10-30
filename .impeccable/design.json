@@ -1,0 +1,293 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-30T14:00:00Z",
+  "title": "Design System: BrandGuard",
+  "extensions": {
+    "colorMeta": {
+      "accent": {
+        "role": "primary",
+        "displayName": "Violet",
+        "canonical": "#6d3bd8",
+        "tonalRamp": [
+          "#241046",
+          "#3b1c78",
+          "#5a2dbd",
+          "#6d3bd8",
+          "#8a63e8",
+          "#ab8df0",
+          "#d4c4f8",
+          "#f0eafd"
+        ]
+      },
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Lavender Canvas",
+        "canonical": "#f6f4fb",
+        "tonalRamp": [
+          "#1c1a2e",
+          "#4a4663",
+          "#6b6784",
+          "#8a85a3",
+          "#b9b5cc",
+          "#d6d0e6",
+          "#e8e4f3",
+          "#f6f4fb"
+        ]
+      },
+      "ok": {
+        "role": "status",
+        "displayName": "Verified Green",
+        "canonical": "#136c3a",
+        "tonalRamp": [
+          "#0a3d21",
+          "#136c3a",
+          "#15803d",
+          "#2db873",
+          "#6fc08f",
+          "#b5e0c5",
+          "#e3f5ea",
+          "#f2fbf5"
+        ]
+      },
+      "warn": {
+        "role": "status",
+        "displayName": "Caution Amber",
+        "canonical": "#8a5300",
+        "tonalRamp": [
+          "#4d2e00",
+          "#6b4100",
+          "#8a5300",
+          "#f0b429",
+          "#e8b955",
+          "#f0d58c",
+          "#fff2d6",
+          "#fffaed"
+        ]
+      },
+      "bad": {
+        "role": "status",
+        "displayName": "Stop Red",
+        "canonical": "#a61b1b",
+        "tonalRamp": [
+          "#5e0f0f",
+          "#8a1616",
+          "#a61b1b",
+          "#e5484d",
+          "#e17f7f",
+          "#f2bcbc",
+          "#fde8e8",
+          "#fff5f5"
+        ]
+      },
+      "field-line": {
+        "role": "neutral",
+        "displayName": "Field Line",
+        "canonical": "#8a85a3",
+        "tonalRamp": [
+          "#3c3a52",
+          "#56526e",
+          "#6f6b88",
+          "#8a85a3",
+          "#a6a2bb",
+          "#c2bfd2",
+          "#dedcea",
+          "#f1f0f7"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Landing headline only."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "One page title per page."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Card headings."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "All reading text, Devanagari-safe stack."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Table headers and sidebar group names."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Approval IDs, fingerprints, quoted transcript."
+      }
+    },
+    "shadows": [
+      {
+        "name": "hairline",
+        "value": "0 1px 2px rgba(60,40,120,.05)",
+        "purpose": "Cards at rest."
+      },
+      {
+        "name": "lift",
+        "value": "0 10px 28px rgba(60,40,120,.12)",
+        "purpose": "Role cards and findings on hover."
+      },
+      {
+        "name": "overlay",
+        "value": "0 12px 40px rgba(28,26,46,.3)",
+        "purpose": "Dialogs and popovers."
+      }
+    ],
+    "motion": [
+      {
+        "name": "fast",
+        "value": "150ms",
+        "purpose": "Hover border and shadow changes."
+      },
+      {
+        "name": "drawer",
+        "value": "200ms",
+        "purpose": "Mobile sidebar slide. All motion disabled under prefers-reduced-motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "wide",
+        "value": "1100px"
+      },
+      {
+        "name": "tablet",
+        "value": "900px"
+      },
+      {
+        "name": "phone",
+        "value": "640px"
+      }
+    ],
+    "themes": [
+      {
+        "name": "light",
+        "default": true,
+        "canvas": "#f6f4fb",
+        "surface": "#ffffff"
+      },
+      {
+        "name": "dark",
+        "selector": ":root[data-theme=dark] or prefers-color-scheme: dark",
+        "canvas": "#0f0c1f",
+        "surface": "#17132b"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Main action.",
+      "html": "<button class=\"ds-btn\">Submit content</button>",
+      "css": ".ds-btn{font-family:Manrope,system-ui,sans-serif;font-size:14px;font-weight:700;border-radius:10px;padding:9px 16px;min-height:44px;border:1px solid transparent;background:#6d3bd8;color:#fff;cursor:pointer}.ds-btn:hover{background:#5a2dbd}.ds-btn:focus-visible{outline:3px solid #8a63e8;outline-offset:2px}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Lower-emphasis action.",
+      "html": "<button class=\"ds-btn2\">Cancel</button>",
+      "css": ".ds-btn2{font-family:Manrope,system-ui,sans-serif;font-size:14px;font-weight:700;border-radius:10px;padding:9px 16px;min-height:44px;border:1px solid #8a85a3;background:#fff;color:#1c1a2e;cursor:pointer}.ds-btn2:hover{background:#f6f4fb}"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Field with label above.",
+      "html": "<label class=\"ds-l\" for=\"ds-i\">Project name</label><input class=\"ds-i\" id=\"ds-i\" value=\"Demo Heights\">",
+      "css": ".ds-l{display:block;font:600 14px Manrope,system-ui,sans-serif;margin:0 0 6px;color:#1c1a2e}.ds-i{width:100%;font:15px Manrope,system-ui,sans-serif;color:#1c1a2e;background:#fff;border:1px solid #8a85a3;border-radius:10px;padding:9px 12px;min-height:44px}.ds-i:focus{outline:3px solid #8a63e8;border-color:#6d3bd8}"
+    },
+    {
+      "name": "Status Chip",
+      "kind": "chip",
+      "refersTo": "chip-ok",
+      "description": "Verdict label with a word.",
+      "html": "<span class=\"ds-c ok\">Approved</span> <span class=\"ds-c warn\">With a person</span> <span class=\"ds-c bad\">Rejected</span>",
+      "css": ".ds-c{display:inline-flex;padding:2px 10px;border-radius:999px;font:600 12px Manrope,system-ui,sans-serif;background:#eceaf3;color:#4a5568}.ds-c.ok{background:#e3f5ea;color:#136c3a}.ds-c.warn{background:#fff2d6;color:#8a5300}.ds-c.bad{background:#fde8e8;color:#a61b1b}"
+    },
+    {
+      "name": "Stat tiles",
+      "kind": "card",
+      "refersTo": "stat-hero",
+      "description": "Hero tile plus quiet tiles.",
+      "html": "<div class=\"ds-row\"><div class=\"ds-s hero\"><span>Awaiting review</span><b>12</b></div><div class=\"ds-s\"><span>Approved</span><b class=\"ok\">48</b></div></div>",
+      "css": ".ds-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;font-family:Manrope,system-ui,sans-serif}.ds-s{display:flex;flex-direction:column;gap:6px;background:#fff;border:1px solid #e8e4f3;border-radius:16px;padding:18px 20px;color:#1c1a2e}.ds-s span{font-size:13px;font-weight:600;color:#6b6784}.ds-s b{font-size:28px;font-weight:800;letter-spacing:-.02em}.ds-s b.ok{color:#136c3a}.ds-s.hero{background:linear-gradient(145deg,#7a4ae6,#5a2dbd);border-color:transparent}.ds-s.hero span,.ds-s.hero b{color:#fff}"
+    },
+    {
+      "name": "Navigation Item",
+      "kind": "nav",
+      "refersTo": "nav-item-current",
+      "description": "Sidebar link; the current page is a raised white pill.",
+      "html": "<div class=\"ds-side\"><a class=\"ds-n\" href=\"#\">Overview</a><a class=\"ds-n cur\" href=\"#\">Review Queue</a></div>",
+      "css": ".ds-side{background:#fbfaff;padding:12px;width:220px;border:1px solid #e8e4f3;border-radius:16px}.ds-n{display:flex;align-items:center;padding:10px 12px;margin:2px 0;border-radius:10px;color:#4a4663;text-decoration:none;font:500 14px Manrope,system-ui,sans-serif;min-height:44px}.ds-n:hover{background:#f1eefa;color:#1c1a2e}.ds-n.cur{background:#fff;color:#5a2dbd;font-weight:700;box-shadow:0 1px 3px rgba(60,40,120,.14)}"
+    },
+    {
+      "name": "Finding",
+      "kind": "custom",
+      "refersTo": "card",
+      "description": "Where, what, why and what to change.",
+      "html": "<div class=\"ds-f\"><span class=\"ds-c bad\">Violation</span><dl><dt>Detected</dt><dd>guaranteed returns</dd><dt>What to do</dt><dd>Remove or rephrase this claim.</dd></dl></div>",
+      "css": ".ds-f{border:1px solid #cf6a6a;border-radius:16px;padding:12px 14px;background:#fff;font-family:Manrope,system-ui,sans-serif;color:#1c1a2e}.ds-c{display:inline-flex;padding:2px 10px;border-radius:999px;font:600 12px Manrope,system-ui,sans-serif}.ds-c.bad{background:#fde8e8;color:#a61b1b}.ds-f dl{display:grid;grid-template-columns:100px 1fr;gap:4px 12px;margin:8px 0 0;font-size:14px}.ds-f dt{color:#6b6784}.ds-f dd{margin:0}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Violet Ledger",
+    "overview": "BrandGuard reads like a clear page of accounts: every verdict is a number you can check, a chip that names it, and a chart that puts it in context. The workspace is a grid of rounded white cards on a pale lavender ground, with one saturated violet that appears in three places only: the main action, the current place, and the single headline figure on each dashboard.",
+    "keyCharacteristics": [
+      "Bento grid of 16px-radius cards; one gradient hero tile per dashboard.",
+      "Big, tabular, heavy numerals over small quiet labels.",
+      "Rings, bars and columns drawn from real submission data; never decorative.",
+      "Status shown by a chip with icon and word, never by colour alone.",
+      "Light by default, dark on request or by system setting."
+    ],
+    "rules": [
+      {
+        "name": "The One Violet Rule",
+        "body": "Violet marks the action, the place you are, and the one headline figure. It never decorates.",
+        "section": "colors"
+      },
+      {
+        "name": "The Status-Only Colour Rule",
+        "body": "Green, amber and red mean a verdict and nothing else.",
+        "section": "colors"
+      },
+      {
+        "name": "The Real-Data Rule",
+        "body": "A chart only ever shows counts from the company's own submissions; there is no sample or placeholder data in a chart.",
+        "section": "colors"
+      },
+      {
+        "name": "The Plain Sentence Rule",
+        "body": "Findings and statuses are plain sentences in sentence case. Uppercase belongs to table headers and group names.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat-At-Rest Rule",
+        "body": "Surfaces carry no shadow beyond the hairline until they float or are hovered.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do keep violet to the action, the current place and the hero figure.",
+      "Do draw every chart from real counts, with a text equivalent.",
+      "Do pair every status colour with an icon and a word.",
+      "Do keep controls at 44px and focus outlines visible.",
+      "Do keep sizes, radii and colours on the defined scales and tokens so the dark theme works.",
+      "Do scope single-key shortcuts to focus inside the control group (WCAG 2.1.4)."
+    ],
+    "donts": [
+      "Don't use green, amber or red for decoration, or add a second accent hue.",
+      "Don't put thick coloured edges on cards or nest a bordered card inside another card.",
+      "Don't show sample or invented numbers in a chart or stat tile.",
+      "Don't use heavy shadows on resting cards.",
+      "Don't convey a verdict by colour alone."
+    ]
+  }
+}

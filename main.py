@@ -21,6 +21,7 @@ from urllib.parse import quote, urlparse
 import requests
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 import accounts as ACC
@@ -82,13 +83,14 @@ def _secret_key():
     return f.read_text(encoding="utf-8").strip()
 
 
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(SessionMiddleware, secret_key=_secret_key(), max_age=3 * 86400, same_site="lax")
 
 
 @app.exception_handler(OverflowError)
 async def _too_big(request, exc):
     """An id far too large for the database (someone typing in the address bar) is simply 'not found'."""
-    return HTMLResponse(ui.landing('<div style="max-width:520px;margin:40px auto"><h1>Not found</h1>'
+    return HTMLResponse(ui.landing('<div class="u-form"><h1>Not found</h1>'
                                    '<p class="page-desc">That page does not exist.</p><p><a class="btn" href="/">Go to the start</a></p></div>'),
                         status_code=404)
 
@@ -98,7 +100,7 @@ async def _unexpected(request, exc):
     """Last safety net: a readable page instead of a bare server error. The details go to the server log."""
     import traceback
     traceback.print_exception(type(exc), exc, exc.__traceback__)
-    return HTMLResponse(ui.landing('<div style="max-width:520px;margin:40px auto"><h1>Something went wrong</h1>'
+    return HTMLResponse(ui.landing('<div class="u-form"><h1>Something went wrong</h1>'
                                    '<p class="page-desc">This action could not be completed. Nothing was changed. Go back and try '
                                    'again; if it keeps happening, tell the company that invited you.</p>'
                                    '<p><a class="btn" href="/">Go to the start</a></p></div>'), status_code=500)
@@ -314,7 +316,7 @@ def err_page(u, msg, request=None):
     back = "/submit" if u["role"] == "submitter" else "/"
     body = (ui.page_header("Could not complete this request")
             + ui.alert(e(msg), "bad", "Something went wrong.")
-            + f'<p style="margin-top:20px"><a class="btn" href="{back}">Go back</a></p>')
+            + f'<p class="u-mt20"><a class="btn" href="{back}">Go back</a></p>')
     return page("Could not complete", body, u, "", [("Error", None)], request)
 
 
@@ -323,6 +325,45 @@ def rep_of(row):
         return json.loads(row["report"] or "{}")
     except (TypeError, ValueError):
         return {}
+
+
+def _sfx(html_, suffix):
+    """Make ids and label targets unique when the same field group is repeated in several forms on one page."""
+    return re.sub(r'(?<![\w-])(id|for)="([A-Za-z_]+)"', lambda m: f'{m.group(1)}="{m.group(2)}-{suffix}"', html_)
+
+
+def lang_attr(text, rep=None):
+    """lang attribute for quoted Devanagari text, so screen readers pronounce Marathi and Hindi correctly."""
+    if any("ऀ" <= ch <= "ॿ" for ch in text):
+        code = "mr" if (rep or {}).get("language") == "mr" else "hi"
+        return f' lang="{code}"'
+    return ""
+
+
+def week_bars(rows):
+    """Submissions per day for the last 7 days, from real created_at stamps (oldest first)."""
+    from datetime import date, timedelta
+    today = date.today()
+    days = [today - timedelta(days=i) for i in range(6, -1, -1)]
+    per = Counter((r["created_at"] or "")[:10] for r in rows)
+    return ui.vbars([(d.strftime("%a"), per.get(d.isoformat(), 0), d == today) for d in days])
+
+
+def status_donut(counts, label):
+    """Approved / rejected / waiting for a person / other, as a ring with a legend."""
+    appr = sum(counts[s] for s in APPROVED_STATUSES)
+    rej = sum(counts[s] for s in REJECTED_STATUSES)
+    wait = counts["SUPERVISION"] + counts["DISPUTED"] + counts["NEEDS_CONFIRMATION"]
+    other = max(sum(counts.values()) - appr - rej - wait, 0)
+    parts = [("Approved", appr, "ok"), ("Rejected", rej, "bad"), ("With a person", wait, "warn")]
+    if other:
+        parts.append(("Other", other, "neutral"))
+    return ui.donut(parts, "submissions", label)
+
+
+def count_of(n, word):
+    """'1 violation', '2 violations'."""
+    return f"{n} {word}{'' if n == 1 else 's'}"
 
 
 def risk_badge(rep):
@@ -335,10 +376,10 @@ def risk_badge(rep):
     return ui.badge(f"{top.title()} risk", tone, "alert" if tone != "neutral" else "info")
 
 
-def sub_table(rows, show_user=True, label="Submissions", review_label="Review"):
+def sub_table(rows, show_user=True, label="Submissions", review_label="Review", compact=False):
     if not rows:
         return ui.empty("Nothing here yet", "Submissions will appear here as soon as they are made.")
-    heads = ["Submission"] + (["Creator"] if show_user else []) + ["Company", "Submitted", "Findings", "Status", "Action"]
+    heads = ["Submission"] + (["Creator"] if show_user else []) + ([] if compact else ["Company"]) + ["Submitted", "Findings", "Status", "Action"]
     out = []
     for r in rows:
         rep = rep_of(r)
@@ -347,8 +388,8 @@ def sub_table(rows, show_user=True, label="Submissions", review_label="Review"):
         cells = [f'<a href="/s/{r["id"]}"><b>#{r["id"]}</b></a>{link}<span class="trunc" title="{fname}">{fname}</span>']
         if show_user:
             cells.append(e(r["uname"]))
-        n = f'{rep.get("flags", 0)} violation(s), {rep.get("supervision", 0)} to check'
-        cells += [e(r["bname"]), f'<span class="muted">{e(r["created_at"])}</span>',
+        n = f'{count_of(rep.get("flags", 0), "violation")}, {rep.get("supervision", 0)} to check'
+        cells += ([] if compact else [e(r["bname"])]) + [f'<span class="muted">{e(r["created_at"])}</span>',
                   f'{risk_badge(rep)}<br><span class="muted">{n}</span>', ui.chip(r["status"]),
                   f'<a class="btn sm {"" if r["status"] in QUEUE_STATUSES and show_user else "secondary"}" '
                   f'href="/s/{r["id"]}" aria-label="{review_label if (r["status"] in QUEUE_STATUSES and show_user) else "View"} submission {r["id"]}">'
@@ -358,6 +399,19 @@ def sub_table(rows, show_user=True, label="Submissions", review_label="Review"):
 
 
 # --------------------------------------------------------------------- landing
+_LONG_CACHE = {"Cache-Control": "public, max-age=31536000, immutable"}
+
+
+@app.get("/assets/app.css")
+def asset_css():
+    return Response(ui.CSS, media_type="text/css; charset=utf-8", headers=_LONG_CACHE)
+
+
+@app.get("/assets/app.js")
+def asset_js():
+    return Response(ui.JS, media_type="application/javascript; charset=utf-8", headers=_LONG_CACHE)
+
+
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -415,25 +469,30 @@ def home(request: Request):
     u = me(request)
     if not u:
         def role(key, ic, title, text, btn):
-            return (f'<div class="card role-card"><span class="ic-lg">{ui.icon(ic, 22)}</span><h2>{title}</h2>'
+            return (f'<div class="card role-card"><h2>{ui.icon(ic, 20)}{title}</h2>'
                     f'<p class="muted">{text}</p><a class="btn" href="/enter/{key}">{btn}{ui.icon("arrow-right", 16)}</a></div>')
-        pills = (
-            f'<div class="feature-pills">'
-            f'<span>{ui.icon("radar", 14)} Brand Risk Radar</span>'
-            f'<span>{ui.icon("wand", 14)} Intent-preserving rewrites</span>'
-            f'<span>{ui.icon("git-branch", 14)} Claim → fact provenance</span>'
-            f'<span>{ui.icon("activity", 14)} Guideline Health</span>'
-            f'<span>{ui.icon("shield", 14)} Human-in-the-loop</span></div>')
+        sample = (
+            '<div class="sample-stage"><aside class="sample" aria-label="Example of a BrandGuard result">'
+            '<p class="sample-tag">Example result, from the demo data</p>'
+            '<p class="sample-copy">&ldquo;Book Demo Heights in Wakad, Pune: 2 BHK at 1.3 crore with '
+            '<mark>guaranteed returns</mark>, hurry!&rdquo;</p>'
+            f'<div class="sample-result"><div class="finding-top">{ui.badge("Rejected", "bad", "x-circle")}'
+            f'{ui.badge("1 claim to verify", "warn", "alert")}</div>'
+            '<dl><dt>Detected</dt><dd>guaranteed returns</dd>'
+            '<dt>Why it matters</dt><dd>It is on the banned-claims list.</dd>'
+            '<dt>What to do</dt><dd>Remove or rephrase this claim.</dd></dl></div>'
+            '<p class="sample-foot">Every result also lists what was <b>not</b> checked. An approval gets an ID and a file fingerprint.</p>'
+            '</aside></div>')
         body = f"""
-        <div class="land-hero"><h1>Brand governance before publish</h1>
-        <p class="page-desc">BrandGuard reviews marketing content against your guidelines, facts and assets —
-        explains every issue, suggests compliant fixes that keep the creator's intent, and routes uncertainty to a person.
-        Nothing ships on a silent guess.</p>{pills}</div>
-        <div class="cols-2" style="margin-bottom:28px">
-          <div class="card role-card"><span class="ic-lg">{ui.icon("building", 22)}</span><h2>Set up your company</h2>
+        <div class="land-top"><div class="land-hero"><h1>Brand governance before publish</h1>
+        <p class="page-desc">BrandGuard checks marketing content against your approved facts and brand rules before it goes live.
+        It explains each problem, suggests a fix, and sends anything it is unsure about to a person.
+        Nothing is approved on a guess.</p></div>{sample}</div>
+        <div class="cols-2 u-mb28">
+          <div class="card role-card"><h2>{ui.icon("building", 20)}Set up your company</h2>
             <p class="muted">Create a company account, add your brand rules and projects, then invite channel partners, freelancers and agencies.</p>
             <a class="btn" href="/signup">Create company account{ui.icon("arrow-right", 16)}</a></div>
-          <div class="card role-card"><span class="ic-lg">{ui.icon("users", 22)}</span><h2>Sign in</h2>
+          <div class="card role-card"><h2>{ui.icon("users", 20)}Sign in</h2>
             <p class="muted">Already have an account, or an invite link from a company? Sign in or open the link you were sent.</p>
             <a class="btn secondary" href="/login">Sign in{ui.icon("arrow-right", 16)}</a></div>
         </div>
@@ -447,15 +506,15 @@ def home(request: Request):
           {role("freelancer", "pen", "Freelancer",
                 "Works with two companies under one login and switches between them.", "Enter as Freelancer")}
         </div>
-        <p style="margin-top:20px"><a class="btn secondary" href="/test-audio">{ui.icon("play", 16)}Judges: demo files</a></p>
-        <p class="muted" style="margin-top:12px">Demo roles are shared sample accounts with fictional data. Real accounts are separate.</p>"""
+        <p class="u-mt20"><a href="/test-audio">Demo files for evaluators</a></p>
+        <p class="muted u-mt12">Demo roles are shared sample accounts with fictional data. Real accounts are separate.</p>"""
         return page("Welcome", body)
     return admin_dash(request, u) if u["role"] == "admin" else submitter_dash(request, u)
 
 
 @app.get("/enter/{key}")
 def enter(request: Request, key: str):
-    uid = DEMO.get("freelancer" if key == "fvideoancer" else key)
+    uid = DEMO.get(key)
     if uid:
         request.session["uid"] = uid
         request.session.pop("company", None)
@@ -492,31 +551,34 @@ def submitter_dash(request, u):
 
     welcome = f"""<section class="card welcome" aria-labelledby="wl"><div class="card-head"><h2 id="wl">Welcome, {e(first)}</h2>
       <button type="button" class="btn secondary sm" data-dismiss="creator">Dismiss</button></div>
-      <p>Submit a video and BrandGuard checks it against {e(cname)}'s approved prices and rules before it is published.
+      <p>Paste copy or upload a video, poster or document, and BrandGuard checks it against {e(cname)}'s approved prices and rules before it is published.
       Uncertain cases are sent to a person, so you always get a clear answer.</p>
       <ol class="steps"><li>Submit content</li><li>Analyze content</li><li>Review findings</li><li>Resolve issues</li><li>Receive a decision</li></ol></section>"""
     attn = ""
     if n["REJECTED"] + n["BLOCKED"]:
-        attn = ui.alert(f'{n["REJECTED"] + n["BLOCKED"]} submission(s) were rejected. Open them to see what to fix. '
+        attn = ui.alert(f'{count_of(n["REJECTED"] + n["BLOCKED"], "submission")} rejected. Open them to see what to fix. '
                         'You can resubmit a corrected file, or dispute the decision if you think it is wrong.',
                         "warn", "Needs your attention.")
     scope = (f'<p class="muted">Showing activity for <b>{e(cname)}</b>. Use the company switcher at the top to change.</p>'
              if multi else "")
-    body = (ui.page_header("My Dashboard", f"Your video submissions for {e(cname)}.",
-                           f'<a class="btn" href="/submit">{ui.icon("upload", 16)}Submit a Video</a>')
+    body = (ui.page_header("My Dashboard", f"Your submissions for {e(cname)}.",
+                           f'<a class="btn" href="/submit">{ui.icon("upload", 16)}Submit content</a>')
             + '<div class="stack">' + welcome + attn + scope
             + '<div class="stats">'
-            + ui.stat("Submissions", len(mine), "", "/reviews")
+            + ui.stat("Submissions", len(mine), "All time", "/reviews", "hero")
             + ui.stat("In review", in_review, "Waiting for a person", "/reviews?status=supervision", "warn")
             + ui.stat("Approved", approved, "", "/reviews?status=approved", "ok")
             + ui.stat("Rejected", rejected, "Fix and resubmit, or dispute", "/reviews?status=rejected", "bad")
             + '</div>'
-            + ui.card("Recent submissions",
-                      sub_table(mine[:5], show_user=False, label="Recent submissions") if mine else
-                      ui.empty("No submissions yet", f"Submit your first video for {e(cname)} to get started.",
-                               '<a class="btn" href="/submit">Submit a Video</a>'),
-                      actions='<a href="/reviews">View all</a>' if len(mine) > 5 else "")
-            + '</div>')
+            + '<div class="bento">'
+            + '<div class="span-8">' + ui.card("Recent submissions",
+                      sub_table(mine[:5], show_user=False, label="Recent submissions", compact=True) if mine else
+                      ui.empty("No submissions yet", f"Check your first piece of content for {e(cname)}. Pasting copy takes seconds.",
+                               '<a class="btn" href="/submit">Submit content</a>'),
+                      actions='<a href="/reviews">View all</a>' if len(mine) > 5 else "") + '</div>'
+            + '<div class="span-4">' + ui.card("Your results", status_donut(n, "Your results by outcome")) + '</div>'
+            + '<div class="span-12">' + ui.card("Last 7 days", week_bars(mine), "Content you submitted per day.") + '</div>'
+            + '</div></div>')
     return page("My Dashboard", body, u, "overview", [], request)
 
 
@@ -559,19 +621,19 @@ def submit_form(request: Request):
       <input id="alt_text" type="text" name="alt_text" maxlength="500"
              placeholder="e.g. Demo Heights 2 BHK offer poster with price and RERA">
       <p class="hint">If Brand Rules require alt text, leave this blank on an image and BrandGuard will flag it for accessibility.</p>
-      {company}{lang}
+      {_sfx(company, 'file')}{_sfx(lang, 'file')}
       <p data-busy hidden class="muted" role="status">Reviewing. On this free server it can take a few minutes. Please keep this page open.</p>
       <button id="submit-file" class="btn" type="submit" data-busy-label="Reviewing...">Submit for Compliance Review</button>
     </form>"""
     if LINKS_ENABLED:
         link_form = f"""
     {ui.alert("Link submission is supported on a laptop or desktop. On a phone, download the video and upload the file instead.", "info")}
-    <form method="post" action="/upload_link" data-lock style="margin-top:16px">
+    <form class="u-mt16" method="post" action="/upload_link" data-lock>
       <label for="url">Link to a public video</label>
       <input id="url" type="url" name="url" required placeholder="https://www.youtube.com/shorts/..." aria-describedby="url-h">
       <p class="hint" id="url-h">YouTube Shorts, Instagram videos and Facebook videos. Both the audio and the post's title and
       description are reviewed. Private posts cannot be fetched.</p>
-      {company}{lang}
+      {_sfx(company, 'link')}{_sfx(lang, 'link')}
       <p data-busy hidden class="muted" role="status">Fetching and reviewing. This can take up to a minute. Please keep this page open.</p>
       <button class="btn" type="submit" data-busy-label="Fetching...">Fetch and Submit for Compliance Review</button>
     </form>"""
@@ -581,12 +643,12 @@ def submit_form(request: Request):
             "downloads from shared cloud servers. It works in the local build on a laptop or desktop. To check a posted video "
             "here, download it and use <b>Upload a file</b>.", "warn", "Links are unavailable here.")
     page_form = f"""
-    <form method="post" action="/upload_page" data-lock style="margin-top:22px">
+    <form class="u-mt22" method="post" action="/upload_page" data-lock>
       <label for="purl">Link to a blog post or web page</label>
       <input id="purl" type="url" name="url" required placeholder="https://www.example.com/blog/new-launch">
       <p class="hint">The page's text is read and checked like a document: prices, banned claims, product facts and wording.
       Only public pages can be read.</p>
-      {company}
+      {_sfx(company, 'page')}
       <button class="btn" type="submit" data-busy-label="Reading...">Check this page</button>
     </form>"""
     link_form = link_form + page_form
@@ -599,24 +661,28 @@ def submit_form(request: Request):
         placeholder="Paste a caption, ad, email or script. Example: Book Demo Heights 2 BHK at 1 crore with guaranteed returns."></textarea>
       <p class="hint">Checked like a document: banned phrases, confidential terms, prices, tone and preferred wording.
       No speech key needed — ideal for a quick demo.</p>
-      {company}
+      {_sfx(company, 'text')}
       <button class="btn" type="submit" data-busy-label="Reviewing...">Check this copy</button>
     </form>"""
     body = (ui.page_header("Submit Content for Review",
                            "BrandGuard checks videos, posters, documents, pages and pasted copy against the brand's approved "
                            "facts and rules. Anything uncertain goes to a person for a decision.")
-            + ui.alert("This demo runs on a free Render server with very little CPU and memory. To review a video, BrandGuard turns the speech into text and then reads every frame of the video, so it can take a few minutes. The first request after a quiet period is slower still, because the server has to wake up. Please keep this page open until the result appears. On a normal server the same review takes seconds. Short videos (under 15 seconds) are quickest. For a fast path, use <b>Paste copy</b>.", "warn", "Please be patient: free server.")
+            + ui.alert("Pasted copy is checked in seconds. Videos can take a few minutes on this free server.", "info")
+            + '<details class="muted note-disclosure"><summary>Why can a video take a few minutes?</summary>'
+              '<p>This demo runs on a free server with little CPU and memory. For a video, BrandGuard turns the speech into text and reads '
+              'every frame. The first request after a quiet period is slower still while the server wakes up. Keep the page open until '
+              'the result appears. Short videos (under 15 seconds) are quickest.</p></details>'
             + '<div class="cols"><div>'
             + ui.card("", f"""
               <div class="method" role="tablist" aria-label="Submission method">
-                <button type="button" class="btn" role="tab" id="tab-file" aria-selected="true" aria-controls="panel-file">{ui.icon("video", 16)}Upload file</button>
-                <button type="button" class="btn" role="tab" id="tab-text" aria-selected="false" aria-controls="panel-text">{ui.icon("clipboard", 16)}Paste copy</button>
+                <button type="button" class="btn" role="tab" id="tab-text" aria-selected="true" aria-controls="panel-text">{ui.icon("clipboard", 16)}Paste copy</button>
+                <button type="button" class="btn" role="tab" id="tab-file" aria-selected="false" aria-controls="panel-file">{ui.icon("video", 16)}Upload file</button>
                 <button type="button" class="btn" role="tab" id="tab-link" aria-selected="false" aria-controls="panel-link">{ui.icon("link", 16)}Paste a link</button></div>
-              <div id="panel-file" role="tabpanel" aria-labelledby="tab-file">{file_form}</div>
-              <div id="panel-text" role="tabpanel" aria-labelledby="tab-text" hidden>{text_form}</div>
+              <div id="panel-text" role="tabpanel" aria-labelledby="tab-text">{text_form}</div>
+              <div id="panel-file" role="tabpanel" aria-labelledby="tab-file" hidden>{file_form}</div>
               <div id="panel-link" role="tabpanel" aria-labelledby="tab-link" hidden>{link_form}</div>""")
             + '</div><div>'
-            + ui.card("What happens next", f"""<ol class="muted" style="padding-left:20px;margin:0">
+            + ui.card("What happens next", f"""<ol class="muted u-list">
               <li>{ui.icon("radar", 14)} <b>Brand Risk Radar</b> summarises the findings across claims, tone, facts, visual, accessibility and confidentiality.</li>
               <li>{ui.icon("git-branch", 14)} <b>Claim provenance</b> maps each claim to an approved fact.</li>
               <li>{ui.icon("wand", 14)} <b>Suggested wording</b> shows a compliant way to say it, where one can be made safely.</li>
@@ -640,7 +706,7 @@ def help_page(request: Request):
         ("REJECTED_FINAL", "A builder upheld the rejection after review."))]
     body = (ui.page_header("Help and Guidelines", "How reviews work and what each status means.")
             + '<div class="stack">'
-            + ui.card("What BrandGuard checks", """<ul class="muted" style="margin:0;padding-left:20px">
+            + ui.card("What BrandGuard checks", """<ul class="muted u-list">
               <li>Prices spoken or written, compared with the approved price list (including forms like "dedh crore" or "sava crore").</li>
               <li>Banned claims and confidential company terms.</li>
               <li>Phone numbers and emails that are not on the approved contact list.</li>
@@ -651,7 +717,7 @@ def help_page(request: Request):
               <li>Accessibility: contrast and text size on images; ALL CAPS, wall-of-text, colour-only cues, weak CTAs and alt text on copy.</li>
               <li>The company's own product facts, such as discounts, warranties, fees, rates and dates.</li></ul>""")
             + ui.card("What each status means", ui.table(["Status", "Meaning"], legend, "Status meanings"))
-            + ui.card("Not available", """<p class="muted" style="margin:0">Checking a RERA number against the official
+            + ui.card("Not available", """<p class="muted u-m0">Checking a RERA number against the official
               register, identifying fonts, and finding a logo that has been redrawn or heavily recoloured.</p>""")
             + '</div>')
     return page("Help and Guidelines", body, u, "help", [("Help and Guidelines", None)], request)
@@ -1635,40 +1701,40 @@ def finding_html(f, sid=None, rep=None, can_suggest=False, can_decide=False):
                 for vi, v in enumerate(variants[:3]):
                     bits.append(
                         f'<div class="rewrite-var"><div><div class="strat">{ui.icon("wand", 14)}{e(v.get("label") or v.get("strategy") or "Rewrite")}</div>'
-                        f'<div style="margin-top:4px">{e(v["text"])}</div>'
-                        f'<div class="muted" style="margin-top:4px">{e(v.get("why") or "")}</div></div>'
+                        f'<div class="u-mt4">{e(v["text"])}</div>'
+                        f'<div class="muted u-mt4">{e(v.get("why") or "")}</div></div>'
                         f'<form method="post" action="/apply-rewrite/{sid}/{f["i"]}" data-lock>'
                         f'<input type="hidden" name="variant" value="{vi}">'
                         f'<button class="btn secondary sm" type="submit">{ui.icon("check", 14)}Apply</button></form></div>')
                 var_html = f'<div class="rewrite-variants">{"".join(bits)}</div>'
             else:
                 var_html = (
-                    f'<form method="post" action="/apply-rewrite/{sid}/{f["i"]}" data-lock style="margin-top:8px">'
+                    f'<form class="u-mt8" method="post" action="/apply-rewrite/{sid}/{f["i"]}" data-lock>'
                     f'<input type="hidden" name="variant" value="0">'
                     f'<button class="btn secondary sm" type="submit">{ui.icon("check", 14)}Apply suggestion</button></form>')
             applied_note = ""
             if applied:
-                applied_note = (f'<div class="alert ok" style="margin-top:8px">{ui.icon("check-circle", 16)}'
+                applied_note = (f'<div class="alert ok u-mt8">{ui.icon("check-circle", 16)}'
                                 f'<div><b>Chosen as your fix.</b> Use this wording when you edit and resubmit: {e(applied.get("text") or "")}</div></div>')
             more = ""
             if got.get("by") == "rule" and can_suggest and llm_ready():
-                more = (f'<form method="post" action="/suggest/{sid}/{f["i"]}" style="margin-top:8px">'
+                more = (f'<form class="u-mt8" method="post" action="/suggest/{sid}/{f["i"]}">'
                         f'<button class="btn secondary sm" type="submit">{ui.icon("wand", 14)}Ask the AI for another wording</button></form>')
             sug = (f'<dt>Suggested wording</dt><dd><div class="rewrite-box">'
                    f'<div class="muted">{by}{strat}</div>{side}{var_html}{applied_note}{more}</div></dd>')
         elif got:
             sug = f'<dt>Suggested wording</dt><dd class="muted">{e(got.get("error") or "No suggestion available.")}</dd>'
         elif can_suggest:
-            sug = (f'<dt>Suggested wording</dt><dd><form method="post" action="/suggest/{sid}/{f["i"]}" style="display:inline">'
+            sug = (f'<dt>Suggested wording</dt><dd><form class="u-inline" method="post" action="/suggest/{sid}/{f["i"]}">'
                    f'<button class="btn secondary sm" type="submit">{ui.icon("wand", 14)}Suggest compliant wording</button></form></dd>')
     if f.get("ai"):
         if f.get("alternative"):
             sug += (f'<dt>Suggested wording</dt><dd><b>{e(f["alternative"])}</b>'
                     f'<div class="muted">Written by the AI reviewer. Check it before using it.</div></dd>')
         if can_decide and sid is not None and "i" in f and f["type"] == "BANNED_PARAPHRASE" and not f.get("dismissed") and not f.get("confirmed"):
-            sug += (f'<dt>Decision</dt><dd><form method="post" action="/ai/{sid}/{f["i"]}/ban" style="display:inline" data-lock>'
+            sug += (f'<dt>Decision</dt><dd><form class="u-inline" method="post" action="/ai/{sid}/{f["i"]}/ban" data-lock>'
                     f'<button class="btn sm" type="submit">{ui.icon("thumbs-up", 14)}Yes, same claim: add to banned phrases</button></form> '
-                    f'<form method="post" action="/ai/{sid}/{f["i"]}/dismiss" style="display:inline" data-lock>'
+                    f'<form class="u-inline" method="post" action="/ai/{sid}/{f["i"]}/dismiss" data-lock>'
                     f'<button class="btn secondary sm" type="submit">{ui.icon("thumbs-down", 14)}No, harmless: dismiss</button></form></dd>')
         elif f.get("confirmed"):
             sug += '<dt>Decision</dt><dd>Confirmed as the same claim and added to the banned phrases.</dd>'
@@ -1678,7 +1744,7 @@ def finding_html(f, sid=None, rep=None, can_suggest=False, can_decide=False):
             f'{ui.badge(str(f.get("severity") or ""), tone, sev_ic)}'
             f'<b>{e(label)}</b>{conf}</div>'
             f'<dl><dt>Where</dt><dd>{e(where)}</dd>'
-            f'<dt>Detected</dt><dd>{e(str(f["evidence"]))}</dd>'
+            f'<dt>Detected</dt><dd{lang_attr(str(f["evidence"]), rep)}>{e(str(f["evidence"]))}</dd>'
             f'<dt>Why it matters</dt><dd>{e(f["explanation"])}</dd>{note}'
             f'<dt>What to do</dt><dd>{e(f["suggestion"])}</dd>{sug}</dl></div>')
 
@@ -1745,11 +1811,11 @@ def checks_card(rep):
         return ""
     lab = {"done": ("Done", "ok", "check-circle"), "pending": ("Waiting", "warn", "clock"),
            "incomplete": ("Incomplete", "warn", "alert"), "not_available": ("Not performed", "neutral", "info")}
-    items = "".join(f'<li style="padding:10px 0;border-bottom:1px solid var(--border, #e5e7eb)">'
-                    f'<div style="display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap">'
+    items = "".join(f'<li class="check-row">'
+                    f'<div class="check-row-top">'
                     f'<b>{e(n)}</b>{ui.badge(*lab.get(st, lab["pending"]))}</div>'
-                    f'<div class="muted" style="margin-top:4px">{e(note)}</div></li>' for n, st, note in chk)
-    return ui.card("What was and was not checked", f'<ul style="list-style:none;margin:0;padding:0">{items}</ul>',
+                    f'<div class="muted u-mt4">{e(note)}</div></li>' for n, st, note in chk)
+    return ui.card("What was and was not checked", f'<ul class="plain-list">{items}</ul>',
                    f"Policy version {e(rep.get('policy', ''))}. A check that was not performed is never counted as passed.")
 
 
@@ -1781,15 +1847,14 @@ def view_submission(request: Request, sid: int):
     findings = rep.get("findings", [])
 
     # ---- decision summary
-    counts = (f'{ui.badge(str(rep.get("flags", 0)) + " violation(s)", "bad", "x-circle")} '
+    counts = (f'{ui.badge(count_of(rep.get("flags", 0), "violation"), "bad", "x-circle")} '
               f'{ui.badge(str(rep.get("supervision", 0)) + " to check", "warn", "alert")} '
-              f'{ui.badge(str(rep.get("passed", 0)) + " claim(s) verified", "ok", "check-circle")}')
+              f'{ui.badge(count_of(rep.get("passed", 0), "claim") + " verified", "ok", "check-circle")}')
     approval = ""
     if s["approval_id"]:
-        approval = (f'<dl class="kv" style="margin-top:14px"><dt>Approval ID</dt><dd><b>{e(s["approval_id"])}</b></dd>'
-                    f'<dt>File hash (SHA-256)</dt><dd class="mono">{e(s["sha256"])}</dd></dl>')
+        approval = ui.approval_record(s["approval_id"], s["sha256"])
     summary = ui.card("", f'<div class="verdict {tone}">{ui.icon(ic, 26)}<div><h2>{e(ui.STATUS.get(s["status"], (s["status"],))[0])}</h2>'
-                      f'<p>{e(why)}</p><p style="margin-top:10px">{counts}</p></div></div>{approval}')
+                      f'<p>{e(why)}</p><p class="u-mt10">{counts}</p></div></div>{approval}')
 
     # Brand Risk Radar (explainable pre-flight score) — always compute so older reports still show it
     radar_html, _risk = GOV.risk_radar_html(rep, icon_fn=ui.icon)
@@ -1837,9 +1902,10 @@ def view_submission(request: Request, sid: int):
                     'Manage lessons under Lessons.</p>')
         yes, no = ("Overturn decision", "Uphold rejection") if disputed else ("Approve", "Reject")
         actions = ui.card("Your decision", ctx + '<p class="muted">Review the findings, then record a decision. '
-                          'It is saved to the audit trail.</p>'
-                          f'<div class="form-actions"><button type="button" class="btn success" data-dialog="dlg-approve">{ui.icon("thumbs-up", 16)}{yes}</button>'
-                          f'<button type="button" class="btn danger" data-dialog="dlg-reject">{ui.icon("thumbs-down", 16)}{no}</button></div>')
+                          'It is saved to the audit trail. With focus in this card: <kbd>A</kbd> approve, <kbd>R</kbd> reject, <kbd>N</kbd> next in queue.</p>'
+                          f'<div class="form-actions"><button type="button" class="btn success" data-dialog="dlg-approve" data-key="a" aria-keyshortcuts="A">{ui.icon("thumbs-up", 16)}{yes}</button>'
+                          f'<button type="button" class="btn danger" data-dialog="dlg-reject" data-key="r" aria-keyshortcuts="R">{ui.icon("thumbs-down", 16)}{no}</button></div>',
+                          cls="keyscope")
         dialogs = (ui.confirm_dialog("dlg-approve", f"{yes}?",
                                      "This approves the content and issues an approval ID." if not disputed else
                                      "This approves the content and issues an approval ID. The creator's dispute is resolved in their favour.",
@@ -1850,7 +1916,7 @@ def view_submission(request: Request, sid: int):
                                        f"/decide/{sid}", no, "danger", ("note", "Reason for the creator", True),
                                        {"decision": "reject"}))
     if s["decision_note"]:
-        actions += ui.card("Reviewer note", f'<p style="margin:0">{e(s["decision_note"])}</p>')
+        actions += ui.card("Reviewer note", f'<p class="u-m0">{e(s["decision_note"])}</p>')
 
     # ---- left column: details + transcript
     lang = s["language"] if s["language"] in ("mr", "hi", "en") else ""
@@ -1870,7 +1936,7 @@ def view_submission(request: Request, sid: int):
     if tr:
         rows = "".join(
             f'<div class="tr-row{" low" if t["conf"] < THRESHOLD else ""}"><time>{fmt_time(t["start"])}</time>'
-            f'<span{f" lang={lang}" if lang else ""}>{e(t["text"])}</span>'
+            f'<span{f" lang={lang}" if lang else lang_attr(t["text"], rep)}>{e(t["text"])}</span>'
             f'<span class="muted conf">{round(t["conf"] * 100)}%{" (low)" if t["conf"] < THRESHOLD else ""}</span></div>'
             for t in tr)
         transcript = ui.card("Transcript and recognition confidence",
@@ -1885,7 +1951,7 @@ def view_submission(request: Request, sid: int):
     if meta is not None:
         if scr_lines:
             srows = "".join(
-                f'<div class="tr-row"><time>{fmt_time(l["start"])}</time><span>{e(l.get("raw") or l["text"])}</span>'
+                f'<div class="tr-row"><time>{fmt_time(l["start"])}</time><span{lang_attr(l.get("raw") or l["text"], rep)}>{e(l.get("raw") or l["text"])}</span>'
                 f'<span class="muted conf">{round(l["conf"] * 100)}%</span></div>' for l in scr_lines)
         else:
             srows = ui.empty("No text was found on screen")
@@ -1937,20 +2003,20 @@ def view_submission(request: Request, sid: int):
     if other:
         parts.append('<h3 class="sec-title">Other checks</h3>' + "".join(finding_html(f, sid, rep, can_sug, can_dec) for f in other))
     if not findings and not claims:
-        parts.append(ui.empty("No issues found", "Nothing in this video broke a rule."))
+        parts.append(ui.empty("No issues found", "Nothing in this content broke a rule."))
     if clean and (findings or claims):
-        parts.append(f'<p class="muted" style="margin-top:12px">{ui.icon("check-circle", 14)} No issues found in: {", ".join(clean)}.</p>')
+        parts.append(f'<p class="muted u-mt12">{ui.icon("check-circle", 14)} No issues found in: {", ".join(clean)}.</p>')
     if s["source_url"]:
         cf = [f for f in findings if f.get("source") == "caption"]
         parts.append('<h3 class="sec-title">Link metadata</h3><p class="muted">'
-                     + (f'{len(cf)} finding(s) came from the post title or description (marked above).' if cf
+                     + (f'{count_of(len(cf), "finding")} came from the post title or description (marked above).' if cf
                         else "The post title and description were checked and had no findings.") + "</p>")
     air = rep.get("ai_review") or {}
     ai_card = ""
     if air:
         body_ = f'<p class="muted">{e(air.get("text", ""))}</p>'
         if air.get("why") and admin:
-            body_ += f'<p class="muted" style="font-size:13px">Reason: {e(air["why"])}</p>'
+            body_ += f'<p class="muted u-fs13">Reason: {e(air["why"])}</p>'
         if air.get("summary"):
             en = air.get("summary_en") or ""
             body_ = (f'<p><b>What was said:</b> {e(air["summary"])}</p>'
@@ -1995,11 +2061,21 @@ def view_submission(request: Request, sid: int):
     audit = ui.card("History", timeline_html(au))
 
     crumbs = [("Review Queue" if admin else "My Submissions", "/queue" if admin else "/reviews"), (f"Submission #{sid}", None)]
+    nxt_link = ""
+    if admin and s["brand_id"] == u["brand_id"]:
+        nx = q("SELECT id FROM submissions WHERE brand_id=? AND status IN ('SUPERVISION','DISPUTED') AND id<>? "
+               "ORDER BY id LIMIT 1", (s["brand_id"], sid))
+        if nx:
+            nxt_link = (f'<a class="btn" href="/s/{nx[0]["id"]}" data-key="n">'
+                        f'Next in queue (#{nx[0]["id"]}){ui.icon("arrow-right", 16)}</a>')
     body = (ui.page_header(f"Submission #{sid}", e(s["filename"] or ""),
-                           f'<a class="btn secondary" href="/reviews">{ui.icon("list", 16)}Back to list</a>')
-            + '<div class="stack">' + summary + radar_card + notes + confirm + actions
-            + '<div class="cols"><div class="stack">' + details + extra + claim_graph + transcript
-            + '</div><div class="stack">' + claims_card + ai_card + findings_card + audit + '</div></div></div>' + dialogs)
+                           f'<a class="btn secondary" href="/reviews">{ui.icon("list", 16)}Back to list</a>' + nxt_link)
+            + '<div class="stack">' + summary + notes + confirm + actions + findings_card + ai_card + radar_card
+            + ui.disclosure("Evidence and history",
+                            '<div class="cols"><div class="stack">' + details + extra + claim_graph + transcript
+                            + '</div><div class="stack">' + claims_card + audit + '</div></div>',
+                            "What was checked, how claims map to approved facts, the text read, and the audit trail.")
+            + '</div>' + dialogs)
     return page(f"Submission {sid}", body, u, "queue" if admin and s["status"] in QUEUE_STATUSES else "reviews", crumbs, request)
 
 
@@ -2067,6 +2143,9 @@ def scope_sql(request, u):
     return "s.user_id=? AND s.brand_id=?", [u["id"], current_company(request, u)]
 
 
+SORTS = {"newest": "Newest first", "oldest": "Oldest first", "risk": "Highest risk first"}
+
+
 def list_view(request, mode):
     u = me(request)
     if not u or (mode == "queue" and u["role"] != "admin"):
@@ -2100,20 +2179,33 @@ def list_view(request, mode):
     total = q(f"SELECT COUNT(*) AS c FROM submissions s JOIN users u ON u.id=s.user_id WHERE {w2}", tuple(a2))[0]["c"]
     pages = max(1, math.ceil(total / PAGE_SIZE))
     pg = min(pg, pages)
-    rows = q(SUB_SQL + f"WHERE {w2} ORDER BY s.id DESC LIMIT {PAGE_SIZE} OFFSET {(pg - 1) * PAGE_SIZE}", tuple(a2))
+    sort = request.query_params.get("sort", "newest")
+    sort = sort if sort in SORTS else "newest"
+    if sort == "risk":
+        # risk lives inside each stored report, so rank in code; review lists are small enough for this
+        allr = q(SUB_SQL + f"WHERE {w2} ORDER BY s.id DESC LIMIT 500", tuple(a2))
+        allr.sort(key=lambda r: GOV.compute_risk(rep_of(r))["score"], reverse=True)
+        rows = allr[(pg - 1) * PAGE_SIZE: pg * PAGE_SIZE]
+    else:
+        order = "s.id ASC" if sort == "oldest" else "s.id DESC"
+        rows = q(SUB_SQL + f"WHERE {w2} ORDER BY {order} LIMIT {PAGE_SIZE} OFFSET {(pg - 1) * PAGE_SIZE}", tuple(a2))
+    sq = "" if sort == "newest" else f"&sort={sort}"
 
     base = "/queue" if mode == "queue" else "/reviews"
     tabs = "".join(
-        f'<a href="{base}?status={k}{"&q=" + quote(term) if term else ""}"{" aria-current=true" if k == st else ""}>'
+        f'<a href="{base}?status={k}{"&q=" + quote(term) if term else ""}{sq}"{" aria-current=true" if k == st else ""}>'
         f'{e(TABS[k][0])} ({tab_count(k)})</a>' for k in tab_keys)
+    sort_opts = "".join(f'<option value="{k}"{" selected" if k == sort else ""}>{e(v)}</option>' for k, v in SORTS.items())
     toolbar = (f'<div class="toolbar"><nav class="tabs" aria-label="Filter by status">{tabs}</nav></div>'
                f'<div class="toolbar"><form method="get" action="{base}" role="search"><input type="hidden" name="status" value="{st}">'
-               f'<label for="q" class="sr-only" style="position:absolute;left:-9999px">Search submissions</label>'
+               f'<label for="sort" class="sr-only">Sort by</label>'
+               f'<select id="sort" name="sort" data-autosubmit class="sort-select">{sort_opts}</select>'
+               f'<label for="q" class="sr-only">Search submissions</label>'
                f'<input id="q" type="search" name="q" value="{e(term)}" placeholder="Search by file, creator or approval ID">'
                f'<button class="btn secondary" type="submit">{ui.icon("search", 16)}Search</button></form></div>')
     if rows:
         listing = sub_table(rows, show_user=admin, label="Submissions") + ui.pager(
-            f"{base}?status={st}" + (f"&q={quote(term)}" if term else ""), pg, pages)
+            f"{base}?status={st}" + (f"&q={quote(term)}" if term else "") + sq, pg, pages)
     elif term or st != "all":
         listing = ui.empty("No matching submissions", "Try a different filter or search term.",
                            f'<a class="btn secondary" href="{base}">Clear filters</a>')
@@ -2121,14 +2213,14 @@ def list_view(request, mode):
         listing = ui.empty("Nothing waiting for you" if mode == "queue" else "No submissions yet",
                            "New items that need a decision will appear here." if mode == "queue" else
                            "Submit a video to see its review here.",
-                           '' if admin else '<a class="btn" href="/submit">Submit a Video</a>')
+                           '' if admin else '<a class="btn" href="/submit">Submit content</a>')
     if mode == "queue":
-        head = ui.page_header("Review Queue", f"{sum(counts.values())} submission(s) need a decision. Open one to see the evidence and decide.")
+        head = ui.page_header("Review Queue", f"{count_of(sum(counts.values()), 'submission')} need{'s' if sum(counts.values()) == 1 else ''} a decision. Open one to see the evidence and decide.")
         crumbs, active = [("Review Queue", None)], "queue"
     else:
         head = ui.page_header("All Reviews" if admin else "My Submissions",
                               "Every submission and its current status." if admin else "Every video you have submitted for the selected company.",
-                              "" if admin else '<a class="btn" href="/submit">Submit a Video</a>')
+                              "" if admin else '<a class="btn" href="/submit">Submit content</a>')
         crumbs, active = [("All Reviews" if admin else "My Submissions", None)], "reviews"
     return page(("Review Queue" if mode == "queue" else "Reviews"), head + ui.card("", toolbar + listing), u, active, crumbs, request)
 
@@ -2170,7 +2262,7 @@ def disputes_page(request: Request):
             lbl = "Resolve" if admin and not resolved else "View"
             out.append([f'<a href="/s/{r["id"]}"><b>#{r["id"]}</b></a><span class="trunc">{e(r["filename"] or "")}</span>']
                        + ([e(r["uname"])] if admin else [])
-                       + [f'<span class="trunc" style="max-width:340px" title="{e(r["dispute_note"] or "")}">{e(r["dispute_note"] or "")}</span>',
+                       + [f'<span class="trunc u-w340" title="{e(r["dispute_note"] or "")}">{e(r["dispute_note"] or "")}</span>',
                           outcome, f'<a class="btn sm" href="/s/{r["id"]}" aria-label="{lbl} dispute for submission {r["id"]}">{lbl}</a>'])
         return ui.table(heads, out, "Disputes")
     body = (ui.page_header("Disputes", "A creator can dispute a rejection. A builder then upholds the rejection or overturns it. "
@@ -2198,7 +2290,7 @@ def approvals_page(request: Request):
                  FROM submissions s JOIN users u ON u.id=s.user_id JOIN brands b ON b.id=s.brand_id
                  WHERE {w2} ORDER BY s.id DESC LIMIT 200""", tuple(a2))
     search = (f'<div class="toolbar"><form method="get" action="/approvals" role="search">'
-              f'<label for="q" style="position:absolute;left:-9999px">Search approval records</label>'
+              f'<label class="sr-only" for="q">Search approval records</label>'
               f'<input id="q" type="search" name="q" value="{e(term)}" placeholder="Search by approval ID or file">'
               f'<button class="btn secondary" type="submit">{ui.icon("search", 16)}Search</button></form></div>')
     if rows:
@@ -2207,7 +2299,7 @@ def approvals_page(request: Request):
             h = r["sha256"] or ""
             verif = (ui.badge("Not applicable (link)", "neutral", "link") if r["source_url"]
                      else ui.badge("Verifiable by file", "ok", "file-check"))
-            out.append([f'<b>{e(r["approval_id"])}</b>', f'<a href="/s/{r["id"]}">#{r["id"]}</a><span class="trunc">{e(r["filename"] or "")}</span>',
+            out.append([f'<b class="mono">{e(r["approval_id"])}</b>', f'<a href="/s/{r["id"]}">#{r["id"]}</a><span class="trunc">{e(r["filename"] or "")}</span>',
                         e(r["bname"]), f'<span class="muted">{e(r["approved_at"] or r["created_at"])}</span>',
                         f'<span class="mono" title="{e(h)}">{e(h[:12])}…</span>' if h else "-", verif])
         listing = ui.table(["Approval ID", "Submission", "Company", "Approved", "SHA-256", "Verification"], out, "Approval records")
@@ -2245,7 +2337,7 @@ def audit_page(request: Request):
     pg = min(pg, pages)
     rows = q(f"SELECT a.* {frm} WHERE {where} ORDER BY a.id DESC LIMIT 25 OFFSET {(pg - 1) * 25}", tuple(args))
     search = (f'<div class="toolbar"><form method="get" action="/audit" role="search">'
-              f'<label for="q" style="position:absolute;left:-9999px">Search the audit trail</label>'
+              f'<label class="sr-only" for="q">Search the audit trail</label>'
               f'<input id="q" type="search" name="q" value="{e(term)}" placeholder="Search by person, action or submission number">'
               f'<button class="btn secondary" type="submit">{ui.icon("search", 16)}Search</button></form></div>')
     if rows:
@@ -2286,14 +2378,14 @@ def setup_checklist(u, brand):
     def _step_link(ok, href, btn):
         if ok:
             return ""
-        return f'<a class="btn secondary sm" style="margin-top:8px" href="{href}">{e(btn)}</a>'
+        return f'<a class="btn secondary sm u-mt8" href="{href}">{e(btn)}</a>'
 
+    # finished steps shrink to one line so the next step stays the focus
     items = "".join(f'<li class="{"done" if ok else ""}"><span class="dot">{"✓" if ok else n}</span><div><b>{e(t)}</b>'
-                    f'<div class="muted">{e(d)}</div>{_step_link(ok, href, btn)}</div></li>'
+                    + ("" if ok else f'<div class="muted">{e(d)}</div>') + f'{_step_link(ok, href, btn)}</div></li>'
                     for n, (ok, t, d, href, btn) in enumerate(steps, 1))
     return (f'<section class="card" aria-labelledby="gs"><div class="card-head"><h2 id="gs">Get started: {done} of {len(steps)} done</h2>'
-            f'<span><button type="button" class="btn secondary sm" data-tour-start>Take the tour</button> '
-            f'<form method="post" action="/admin/onboarding/hide" style="display:inline"><button class="btn secondary sm" type="submit">Hide</button></form></span></div>'
+            f'<span><form class="u-inline" method="post" action="/admin/onboarding/hide"><button class="btn secondary sm" type="submit">Hide</button></form></span></div>'
             f'<ol class="checklist">{items}</ol></section>')
 
 
@@ -2335,30 +2427,35 @@ def admin_dash(request, u):
     if setup:
         welcome = setup
     if queue:
-        prio = sub_table(queue[:5], show_user=True, label="Priority reviews")
+        prio = sub_table(queue[:5], show_user=True, label="Priority reviews", compact=True)
     else:
         prio = ui.empty("You are all caught up", "Nothing is waiting for a decision right now.")
     if types:
-        common = "<ul style='margin:0;padding-left:20px'>" + "".join(
-            f"<li>{e(TYPE_LABEL.get(k, k))}: <b>{v}</b></li>" for k, v in types.most_common(5)) + "</ul>"
-        insights = (common + f'<p style="margin-top:12px">Disputes overturned: <b>{ovd.get("DISPUTE_OVERTURNED", 0)}</b> · '
-                    f'upheld: <b>{ovd.get("DISPUTE_UPHELD", 0)}</b></p>'
-                    '<p class="muted">Findings that creators successfully dispute may point to guidelines that need clearer wording.</p>')
+        findings_chart = ui.hbars([(TYPE_LABEL.get(k, k), v) for k, v in types.most_common(5)])
+        findings_note = (f'<p class="muted u-mt16">Disputes overturned: <b>{ovd.get("DISPUTE_OVERTURNED", 0)}</b> &middot; '
+                         f'upheld: <b>{ovd.get("DISPUTE_UPHELD", 0)}</b>. Findings that creators successfully dispute may point to '
+                         'guidelines that need clearer wording.</p>')
     else:
-        insights = ui.empty("No findings yet", "Insights appear after submissions are reviewed.")
+        findings_chart = ui.empty("No findings yet", "Insights appear after submissions are reviewed.")
+        findings_note = ""
     body = (ui.page_header("Compliance Overview",
                            f"Review activity for {e(brand['name'])}. Pending decisions are listed first.",
                            f'<a class="btn" href="/queue">{ui.icon("inbox", 16)}Review Queue ({len(queue)})</a>')
             + '<div class="stack">' + welcome
             + '<div class="stats">'
-            + ui.stat("Awaiting review", len(queue), f"{n['SUPERVISION']} supervision, {n['DISPUTED']} disputed", "/queue", "info")
+            + ui.stat("Awaiting review", len(queue), f"{n['SUPERVISION']} supervision, {n['DISPUTED']} disputed", "/queue", "hero")
             + ui.stat("Supervision required", n["SUPERVISION"], "BrandGuard was unsure", "/queue?status=supervision", "warn")
             + ui.stat("Approved", approved, "Auto and reviewer approvals", "/reviews?status=approved", "ok")
             + ui.stat("Rejected", rejected, "", "/reviews?status=rejected", "bad")
             + '</div>'
-            + ui.card("Priority reviews", prio, actions='<a href="/queue">Open queue</a>' if queue else "")
-            + '<div class="grid-2">' + ui.card("Recent activity", timeline_html(recent), actions='<a href="/audit">Full audit trail</a>')
-            + ui.card("Compliance insights", insights, actions='<a href="/admin/insights">Open insights</a>') + '</div></div>')
+            + '<div class="bento">'
+            + '<div class="span-8">' + ui.card("Priority reviews", prio, actions='<a href="/queue">Open queue</a>' if queue else "") + '</div>'
+            + '<div class="span-4">' + ui.card("Decisions", status_donut(n, "Decisions by outcome")) + '</div>'
+            + '<div class="span-4">' + ui.card("Last 7 days", week_bars(allrows), "Submissions received per day.") + '</div>'
+            + '<div class="span-4">' + ui.card("Most common findings", findings_chart + findings_note,
+                                              actions='<a href="/admin/insights">Open insights</a>') + '</div>'
+            + '<div class="span-4">' + ui.card("Recent activity", timeline_html(recent), actions='<a href="/audit">Full audit trail</a>') + '</div>'
+            + '</div></div>')
     return page("Overview", body, u, "overview", [], request)
 
 
@@ -2408,7 +2505,7 @@ def insights_page(request: Request):
                   for k, v in data["sources"].most_common()) or "<li>None</li>"
     words = "".join(f"<li><span class='mono'>{e(k)}</span>: <b>{v}</b></li>"
                     for k, v in data["wording"].most_common(8) if k) or "<li>No repeated wording flags yet.</li>"
-    creators = "".join(f"<li>{e(n)}: <b>{c}</b> rejection(s)</li>" for n, c in data["creators"]) or "<li>No rejections yet.</li>"
+    creators = "".join(f"<li>{e(n)}: <b>{count_of(c, 'rejection')}</b></li>" for n, c in data["creators"]) or "<li>No rejections yet.</li>"
     rate_pct = round(data["overturn_rate"] * 100)
     if data["unclear"]:
         clarity = ui.alert(
@@ -2519,12 +2616,12 @@ def rules_page(request: Request, err: str = ""):
                 f'<button type="submit" class="btn">Save change</button></div></form></dialog>')
         tbl = (ui.table(["Rule", "Status", "Actions"], rows, title) if rows else
                ui.empty("No matching rules" if term else "No rules yet", "Add one below." if not term else ""))
-        add = (f'<form method="post" action="/admin/rules/add" class="toolbar" style="margin:14px 0 0" data-lock>'
-               f'<input type="hidden" name="field" value="{key}"><label for="add-{key}" style="position:absolute;left:-9999px">Add to {e(title)}</label>'
-               f'<input id="add-{key}" name="value" required maxlength="200" placeholder="{e(ph)}" style="flex:1;min-width:200px;margin:0">'
+        add = (f'<form method="post" action="/admin/rules/add" class="toolbar u-mt14" data-lock>'
+               f'<input type="hidden" name="field" value="{key}"><label class="sr-only" for="add-{key}">Add to {e(title)}</label>'
+               f'<input id="add-{key}" name="value" required maxlength="200" placeholder="{e(ph)}" class="inline-add">'
                f'<button class="btn" type="submit">{ui.icon("plus", 16)}Add</button></form>')
         cards.append(ui.card(f"{title} ({len(reg.get(key, []))})", tbl + add, desc))
-    search = (f'<div class="toolbar"><form method="get" action="/admin/rules" role="search"><label for="q" style="position:absolute;left:-9999px">Search rules</label>'
+    search = (f'<div class="toolbar"><form method="get" action="/admin/rules" role="search"><label class="sr-only" for="q">Search rules</label>'
               f'<input id="q" type="search" name="q" value="{e(term)}" placeholder="Search all rules">'
               f'<button class="btn secondary" type="submit">{ui.icon("search", 16)}Search</button></form></div>')
     body = (ui.page_header("Brand Rules", f"The rules every submission for {e(reg.get('brand', ''))} is checked against. "
@@ -2638,9 +2735,9 @@ def pack_card():
             continue
         p, n = packs.PACKS[k], packs.counts(k)
         src = "".join(f"<li><b>{e(t)}</b><br><span class='muted'>{e(d)}</span></li>" for t, d in p.get("sources", []))
-        rows += (f'<details style="margin:0 0 10px"><summary><b>{e(lbl)}</b> '
+        rows += (f'<details class="u-mb10"><summary><b>{e(lbl)}</b> '
                  f'<span class="muted">({n["banned"]} banned phrases, {n["terminology"]} terms, {n["tone"]} tone notes)</span></summary>'
-                 f'<div style="padding:8px 0 0 14px"><p class="muted" style="margin:0 0 6px">Based on:</p><ul>{src}</ul>'
+                 f'<div class="based-on"><p class="muted u-mb6">Based on:</p><ul>{src}</ul>'
                  f'<form method="post" action="/admin/rules/pack" data-lock>'
                  f'<input type="hidden" name="pack" value="{k}"><button class="btn secondary sm" type="submit">Add {e(lbl)} rules</button></form>'
                  f'</div></details>')
@@ -2661,7 +2758,7 @@ def rules_pack(request: Request, pack: str = Form("")):
     save_reg(u, reg)
     n = sum(added.values())
     log(None, u["name"], "PACK_APPLIED", f"{packs.PACKS[pack]['label']}: {n} rule(s) added", u["brand_id"])
-    request.session["flash"] = (f"{packs.PACKS[pack]['label']}: {n} rule(s) added." if n
+    request.session["flash"] = (f"{packs.PACKS[pack]['label']}: {count_of(n, 'rule')} added." if n
                                 else "All of those rules were already there.")
     return RedirectResponse("/admin/rules", 303)
 
@@ -2740,7 +2837,7 @@ def facts_view(request, u, reg, err="", form=None):
             f'<button type="submit" class="btn">Save price</button></div></form></dialog>')
     price_tbl = (ui.table(["Configuration", "Approved price", "Engine", "Actions"], rows, "Approved prices") if rows
                  else ui.empty("No approved prices", "Add at least one price. Without it, prices cannot be verified."))
-    add = (f'<form method="post" action="/admin/facts/price" data-lock style="margin-top:16px"><div class="field-grid">'
+    add = (f'<form class="u-mt16" method="post" action="/admin/facts/price" data-lock><div class="field-grid">'
            f'<div><label for="pn">Configuration <span class="req">(required)</span></label><input id="pn" name="name" required maxlength="80" '
            f'value="{e(f.get("name", ""))}" placeholder="e.g. 2 BHK"></div>'
            f'<div><label for="pp">Approved price <span class="req">(required)</span></label><input id="pp" name="price" required '
@@ -2854,7 +2951,7 @@ def verify_page(request, u, result=""):
             + result + '</div><div>'
             + ui.card("How this works", """<p class="muted">Every approved file has a SHA-256 fingerprint. Even a tiny edit changes
               it completely. If the file you upload has the same fingerprint as an approved submission, it is identical to what was approved.</p>
-              <p class="muted" style="margin:0">A file that does not match has simply not been approved in this form. That does not mean it is unsafe.</p>""")
+              <p class="muted u-m0">A file that does not match has simply not been approved in this form. That does not mean it is unsafe.</p>""")
             + '</div></div>')
     return page("Verify a File", body, u, "verify", [("Verify a File", None)], request)
 
@@ -2885,14 +2982,14 @@ def verify_check(request: Request, file: UploadFile = File(...)):
     digest = h.hexdigest()
     rows = q("SELECT id, approval_id, brand_id, user_id FROM submissions WHERE sha256=? AND approval_id IS NOT NULL AND source_url IS NULL",
              (digest,))
-    fp = f'<dl class="kv" style="margin-top:12px"><dt>File fingerprint (SHA-256)</dt><dd class="mono">{digest}</dd></dl>'
+    fp = f'<dl class="kv u-mt12"><dt>File fingerprint (SHA-256)</dt><dd class="mono">{digest}</dd></dl>'
     if rows:
         r = rows[0]
         link = ""
         if can_view(u, {"brand_id": r["brand_id"], "user_id": r["user_id"]}):
             link = f' <a href="/s/{r["id"]}">View submission #{r["id"]}</a>.'
-        result = ui.card("", ui.alert(f'This file is identical to an approved submission. Approval ID: <b>{e(r["approval_id"])}</b>.{link}',
-                                      "ok", "Match.") + fp)
+        result = ui.card("", ui.alert(f'This file is identical to an approved submission.{link}', "ok", "Match.")
+                         + ui.approval_record(r["approval_id"], digest))
     else:
         result = ui.card("", ui.alert("This file does not match any approved record. It may have been edited after approval, "
                                       "or it was never approved in this form.", "warn", "No match.") + fp)
@@ -2981,7 +3078,7 @@ def projects_page(request: Request):
                     'the AI propose the products and facts. Nothing is saved until you check it and confirm.</p>'
                     '<a class="btn" href="/admin/import">Import spreadsheet or brochure</a> '
                     '<a class="btn secondary" href="/admin/fact-types">Fact types</a> '
-                    '<form method="post" action="/admin/sample" style="display:inline" data-lock>'
+                    '<form class="u-inline" method="post" action="/admin/sample" data-lock>'
                     '<button class="btn secondary" type="submit">Load sample data</button></form>')
     if load_reg(u).get("domain", "property") != "property":
         prow = [[r_[0], r_[3], r_[4]] for r_ in rows]
@@ -3028,7 +3125,7 @@ def fact_rows_html(pid, unit_id=None):
         src = q("SELECT title FROM sources WHERE id=?", (f["source_id"],)) if f["source_id"] else []
         end = ""
         if cur:
-            end = (f'<form method="post" action="/admin/projects/{pid}/fact/end" style="display:inline"><input type="hidden" name="fact_id" value="{f["id"]}">'
+            end = (f'<form class="u-inline" method="post" action="/admin/projects/{pid}/fact/end"><input type="hidden" name="fact_id" value="{f["id"]}">'
                    f'<button class="btn secondary sm" type="submit">Withdraw</button></form>')
         label = (f["key"][2:].capitalize() if f["key"].startswith("g:") else
                  RE.FACT_LABEL.get(f["key"], f["key"].replace("offer:", "Offer: ").replace("landmark:", "Place: ")))
@@ -3158,7 +3255,7 @@ def product_facts_card(u, p):
             ut = RE._q("SELECT label FROM unit_types WHERE id=?", (f["unit_type_id"],)) if f["unit_type_id"] else []
             rows.append([e(d["label"]), e(RE.fact_display(f)), e(ut[0]["label"] if ut else "Whole product"),
                          e(GEN.DIRECTIONS[d["direction"]]), f'{e(f["valid_from"] or "")} to {e(f["valid_to"] or "open")}',
-                         f'<form method="post" action="/admin/projects/{p["id"]}/fact/end" style="display:inline">'
+                         f'<form class="u-inline" method="post" action="/admin/projects/{p["id"]}/fact/end">'
                          f'<input type="hidden" name="fact_id" value="{f["id"]}"><button class="btn secondary sm" type="submit">Withdraw</button></form>'])
     form = (f'<form method="post" action="/admin/projects/{p["id"]}/gfact" data-lock><div class="field-grid">'
             f'<div><label for="gd">Fact</label><select id="gd" name="def_id">{def_opts}</select></div>'
@@ -3329,7 +3426,7 @@ def import_page(request: Request):
     guide_rows = [[f'<b>{e(c)}</b>', e(IMP.COLUMN_HELP.get(c, ("", ""))[0]), f'<span class="mono">{e(IMP.COLUMN_HELP.get(c, ("", ""))[1])}</span>']
                   for c in IMP.COLUMNS[domain]]
     guide = (ui.table(["Column", "What to write", "Example"], guide_rows, "Template columns")
-             + f'<h3 class="sec-title">Rules</h3><ul class="muted" style="padding-left:20px">'
+             + f'<h3 class="sec-title">Rules</h3><ul class="muted u-indent">'
              f'<li>Leave a cell empty if it does not apply. Empty cells are skipped, never saved as zero.</li>'
              f'<li>For a {thing} with variants, write one row per variant and repeat the {thing} name.</li>'
              + (f'<li>Fill once-per-project columns (other names, booking amount, possession, RERA) on any one of its rows.</li>'
@@ -3439,7 +3536,7 @@ def import_preview(request: Request, iid: int):
     by = "the AI read the document" if meta["kind"] == "brochure" else "read from your spreadsheet"
     form = (f'<form method="post" action="/admin/import/{iid}/apply" data-lock>'
             + ui.table(["", "What", "Row", "Check"], trs, "Proposed rows")
-            + f'<div class="field-grid" style="margin-top:12px"><div><label for="st">Source document name</label>'
+            + f'<div class="field-grid u-mt12"><div><label for="st">Source document name</label>'
             f'<input id="st" name="source" required value="{e(meta["title"])}"></div></div>'
             f'<p class="hint">Rows marked Check are unticked. Values the AI proposed that are not in the document are unticked: tick them '
             f'only if you know they are right. Rows with errors cannot be imported; fix them in the file and upload again.</p>'
@@ -3497,7 +3594,7 @@ def fact_types_page(request: Request):
         return RedirectResponse("/", 303)
     rows = [[f'<b>{e(d["label"])}</b>', e(GEN.TYPES[d["ftype"]]), e(", ".join(d["units"]) or "-"),
              e(", ".join(d["aliases"]) or "-"), e(GEN.DIRECTIONS[d["direction"]]),
-             f'<form method="post" action="/admin/fact-types/remove" style="display:inline"><input type="hidden" name="def_id" value="{d["id"]}">'
+             f'<form class="u-inline" method="post" action="/admin/fact-types/remove"><input type="hidden" name="def_id" value="{d["id"]}">'
              f'<button class="btn secondary sm" type="submit">Remove</button></form>'] for d in GEN.list_defs(u["brand_id"])]
     t_opts = "".join(f'<option value="{k}">{e(v)}</option>' for k, v in GEN.TYPES.items())
     d_opts = "".join(f'<option value="{k}">{e(v)}</option>' for k, v in GEN.DIRECTIONS.items())
@@ -3704,7 +3801,7 @@ def access_page(request: Request):
         for g in gs:
             pr = RE.get_project(g["project_id"])
             exp = f' <span class="muted">until {e(g["expires"])}</span>' if g["expires"] else ""
-            items += (f'<form method="post" action="/admin/access/revoke" style="display:inline-block;margin:2px 6px 2px 0">'
+            items += (f'<form method="post" action="/admin/access/revoke" class="revoke-form">'
                       f'<input type="hidden" name="grant_id" value="{g["id"]}">{ui.badge(pr["official_name"] if pr else "?", "info")}{exp} '
                       f'<button class="btn secondary sm" type="submit" aria-label="Remove access to {e(pr["official_name"] if pr else "")}">Remove</button></form>')
         rows.append([e(us["name"]), items or '<span class="muted">No project access</span>'])
@@ -3738,7 +3835,7 @@ async def access_grant(request: Request):
             RE.grant(int(uid), u["brand_id"], int(pid), u["name"], (f.get("expires") or None))
             log(None, u["name"], "ACCESS_GRANTED", f"user {uid} -> {RE.get_project(int(pid))['official_name']}", u["brand_id"])
             n += 1
-    request.session["flash"] = f"Access granted for {n} project(s)." if n else "Tick at least one project."
+    request.session["flash"] = f"Access granted for {count_of(n, 'project')}." if n else "Tick at least one project."
     return RedirectResponse("/admin/access", 303)
 
 
@@ -3783,7 +3880,7 @@ def auth_form(title, intro, fields, action, button, error="", extra="", industry
         opts = "".join(f'<option value="{k}"{" selected" if k == industry else ""}>{e(lbl)}</option>' for k, lbl in packs.OPTIONS)
         inputs += (f'<div><label for="f-industry">Your industry</label><select id="f-industry" name="industry">{opts}</select>'
                    f'<p class="hint">You get a starter list of claims to avoid for this industry. You can edit it any time.</p></div>')
-    return (f'<div style="max-width:460px;margin:0 auto"><h1>{e(title)}</h1><p class="page-desc">{intro}</p>{alert}'
+    return (f'<div class="u-narrow"><h1>{e(title)}</h1><p class="page-desc">{intro}</p>{alert}'
             f'<form method="post" action="{action}" data-lock class="stack">{inputs}'
             f'<button class="btn" type="submit">{e(button)}</button></form>{extra}</div>')
 
@@ -3798,7 +3895,7 @@ def signup_form(request: Request):
          ("email", "Work email", "email", "", True, "email"),
          ("password", f"Password (at least {ACC.MIN_PASSWORD} characters)", "password", "", True, "new-password")],
         "/signup", "Create company",
-        extra='<p class="muted" style="margin-top:14px">Already have an account? <a href="/login">Sign in</a></p>', industry=""))
+        extra='<p class="muted u-mt14">Already have an account? <a href="/login">Sign in</a></p>', industry=""))
 
 
 @app.post("/signup")
@@ -3833,8 +3930,8 @@ def login_form(request: Request):
         "Sign in", "Use the email and password you registered with.",
         [("email", "Email", "email", "", True, "email"), ("password", "Password", "password", "", True, "current-password")],
         "/login", "Sign in",
-        extra='<p class="muted" style="margin-top:14px"><a href="/forgot">Forgot your password?</a></p>'
-              '<p class="muted" style="margin-top:6px">New here? <a href="/signup">Create a company account</a>. '
+        extra='<p class="muted u-mt14"><a href="/forgot">Forgot your password?</a></p>'
+              '<p class="muted u-mt6">New here? <a href="/signup">Create a company account</a>. '
               'Invited by a company? Open the link in your invite email.</p>'))
 
 
@@ -3912,28 +4009,28 @@ def team_page(request: Request):
     notice = ""
     if link:
         notice = ui.alert(f'Invite link (shown once, single use, valid {ACC.INVITE_DAYS} days): '
-                          f'<br><input readonly value="{e(link)}" style="width:100%" onclick="this.select()">',
+                          f'<br><input class="u-w100" readonly value="{e(link)}" onclick="this.select()">',
                           "ok", "Invite created.")
     mrows = []
     for m in ACC.members(bid):
         label = "Builder" if m["kind"] == "builder" else ACC.KINDS.get(m["kind"], (m["kind"],))[0]
         rm = ""
         if m["kind"] != "builder":
-            rm = (f'<form method="post" action="/admin/team/remove" style="display:inline"><input type="hidden" name="user_id" value="{m["id"]}">'
+            rm = (f'<form class="u-inline" method="post" action="/admin/team/remove"><input type="hidden" name="user_id" value="{m["id"]}">'
                   f'<button class="btn secondary sm" type="submit">Remove</button></form>')
         mrows.append([e(m["name"]), e(m["email"] or ""), e(label), e(str(m["joined"] or "")[:10]), rm])
     irows = []
     for i in ACC.pending_invites(bid):
         irows.append([e(i["email"]), e(ACC.KINDS[i["kind"]][0]), e(i["expires_at"][:10]),
-                      f'<form method="post" action="/admin/team/revoke" style="display:inline"><input type="hidden" name="invite_id" value="{i["id"]}">'
+                      f'<form class="u-inline" method="post" action="/admin/team/revoke"><input type="hidden" name="invite_id" value="{i["id"]}">'
                       f'<button class="btn secondary sm" type="submit">Cancel</button></form>'])
     projects = RE.brand_projects(bid)
     word = "projects" if load_reg(u).get("domain", "property") == "property" else "products"
-    boxes = (f'<label style="display:block;font-weight:600"><input type="checkbox" name="all_projects" value="1" checked '
+    boxes = (f'<label class="all-projects"><input type="checkbox" name="all_projects" value="1" checked '
              f'id="allp"> All {word}, including ones you add later</label>'
-             + (f'<p class="hint" style="margin-top:6px">Or untick that and choose only some:</p>' if projects else
-                f'<p class="hint" style="margin-top:6px">You have no {word} yet. With this ticked, the person gets each one as you add it.</p>')
-             + "".join(f'<label style="display:block;margin-left:22px"><input type="checkbox" name="project_id" value="{p["id"]}"> '
+             + (f'<p class="hint u-mt6">Or untick that and choose only some:</p>' if projects else
+                f'<p class="hint u-mt6">You have no {word} yet. With this ticked, the person gets each one as you add it.</p>')
+             + "".join(f'<label class="sub-project"><input type="checkbox" name="project_id" value="{p["id"]}"> '
                        f'{e(p["official_name"])}</label>' for p in projects))
     kinds = "".join(f'<option value="{k}">{e(v[0])}</option>' for k, v in ACC.KINDS.items())
     mail_note = ("The invite is also emailed." if mailer.configured()
@@ -4112,15 +4209,15 @@ def team_bulk_preview(request: Request, iid: int):
         "Email is not set up, so you will get a list of links to send yourself."
     need = otp_needed(u)
     code_box = ("" if not need else
-                f'<div style="margin:14px 0"><form method="post" action="/admin/otp/send" style="display:inline">'
+                f'<div class="u-my14"><form class="u-inline" method="post" action="/admin/otp/send">'
                 f'<input type="hidden" name="purpose" value="bulk:{iid}"><input type="hidden" name="back" value="/admin/team/bulk/{iid}">'
                 f'<button class="btn secondary" type="submit">Email me a code</button></form>'
-                f'<p class="hint" style="margin-top:8px">For safety, every bulk invite needs a fresh code sent to {e(u["email"])}.</p></div>')
+                f'<p class="hint u-mt8">For safety, every bulk invite needs a fresh code sent to {e(u["email"])}.</p></div>')
     form = ('' if meta["applied_at"] else code_box +
             f'<form method="post" action="/admin/team/bulk/{iid}/send" data-lock>'
-            + (f'<label for="oc">Code from the email</label><input id="oc" name="code" inputmode="numeric" autocomplete="one-time-code" '
-               f'maxlength="6" required style="max-width:200px">' if need else "")
-            + f'<button class="btn" type="submit" {"disabled" if not n_ok else ""}>Create {n_ok} invite(s)</button></form>')
+            + (f'<label for="oc">Code from the email</label><input class="u-w200" id="oc" name="code" inputmode="numeric" autocomplete="one-time-code" '
+               f'maxlength="6" required>' if need else "")
+            + f'<button class="btn" type="submit" {"disabled" if not n_ok else ""}>Create {count_of(n_ok, "invite")}</button></form>')
     body = (ui.page_header("Check the invite list", f"{n_ok} of {len(people)} rows are ready. Rows with a problem are skipped. {sends}",
                            '<a class="btn secondary" href="/admin/team">Back</a>')
             + '<div class="stack">' + (ui.alert(f"Already sent on {e(meta['applied_at'])}.", "ok") if meta["applied_at"] else "")
@@ -4165,11 +4262,11 @@ def team_bulk_send(request: Request, iid: int, code: str = Form("")):
     log(None, u["name"], "INVITE_CREATED", f"Bulk: {n_made} invite(s) created, {n_sent} emailed", u["brand_id"])
     rows = [[e(em), ui.badge("Emailed", "ok", "check") if sent else (ui.badge("Not created", "bad", "x-circle") if not link
              else ui.badge("Send yourself", "warn", "alert")),
-             (f'<input readonly value="{e(link)}" style="width:100%;margin:0" onclick="this.select()">' if link and not sent else e(err or ""))]
+             (f'<input class="u-w100 u-m0" readonly value="{e(link)}" onclick="this.select()">' if link and not sent else e(err or ""))]
             for em, link, sent, err in results]
     note = ("Links are shown only on this page, once. Copy the ones marked 'Send yourself' now."
             if n_made > n_sent else "Everyone was emailed.")
-    body = (ui.page_header("Invites created", f"{n_made} invite(s) created, {n_sent} emailed.",
+    body = (ui.page_header("Invites created", f"{count_of(n_made, 'invite')} created, {n_sent} emailed.",
                            '<a class="btn" href="/admin/team">Back to Team</a>')
             + '<div class="stack">' + ui.alert(note, "info" if n_made > n_sent else "ok")
             + (ui.alert(f"Email problem: {e(mailer.last_error)}", "warn") if n_made > n_sent and mailer.configured() and mailer.last_error else "")
@@ -4206,10 +4303,10 @@ def otp_gate_html(u, request):
         return ""
     return (f'<div id="verify"><p>For safety, confirm it is you before adding people. We email a 6-digit code to '
             f'<b>{e(u["email"])}</b>. It works for {OTP_SESSION_MINUTES} minutes in this sign-in.</p>'
-            f'<form method="post" action="/admin/otp/send" style="margin-bottom:12px"><input type="hidden" name="purpose" value="invite">'
+            f'<form class="u-mb12" method="post" action="/admin/otp/send"><input type="hidden" name="purpose" value="invite">'
             f'<input type="hidden" name="back" value="/admin/team#verify"><button class="btn secondary" type="submit">Email me a code</button></form>'
             f'<form method="post" action="/admin/otp/verify" data-lock><label for="otp">Code</label>'
-            f'<input id="otp" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required style="max-width:200px">'
+            f'<input class="u-w200" id="otp" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>'
             f'<button class="btn" type="submit">Confirm</button></form></div>')
 
 
@@ -4288,7 +4385,7 @@ def security_card(u):
     cd = reg.get("security", {}).get("reset_cooldown_min", int(os.environ.get("RESET_COOLDOWN_MIN", "10")))
     return ui.card("Security",
                    f'<form method="post" action="/admin/security" data-lock><label for="rc">Password reset cool-down (minutes)</label>'
-                   f'<input id="rc" name="reset_cooldown_min" type="number" min="1" max="1440" value="{int(cd)}" style="max-width:200px">'
+                   f'<input class="u-w200" id="rc" name="reset_cooldown_min" type="number" min="1" max="1440" value="{int(cd)}">'
                    f'<p class="hint">After someone in your company asks for a password reset email, they must wait this long before '
                    f'asking again. Reset links work for {ACC.RESET_MINUTES} minutes and only once. Adding people needs a code '
                    f'emailed to the builder; a list of people needs a fresh code every time. Limits: {INVITES_PER_DAY} invites a '
@@ -4325,7 +4422,7 @@ FORGOT_MSG = ("If an account with that email exists, we have sent a link to rese
 def forgot_form(request: Request):
     return page("Reset password", auth_form("Reset your password", "Enter the email you sign in with. We will email you a link.",
                                             [("email", "Email", "email", "", True, "email")], "/forgot", "Email me a link",
-                                            extra='<p class="muted" style="margin-top:14px"><a href="/login">Back to sign in</a></p>'))
+                                            extra='<p class="muted u-mt14"><a href="/login">Back to sign in</a></p>'))
 
 
 @app.post("/forgot", response_class=HTMLResponse)
@@ -4346,7 +4443,7 @@ def forgot(request: Request, email: str = Form("")):
                            f"{ACC.RESET_MINUTES} minutes):\n{link}\n\nIf you did not ask for this, ignore this email. "
                            f"Your password stays the same.")
                 log(None, user["name"], "PASSWORD_RESET_REQUESTED", "Reset link emailed", user["brand_id"])
-    return page("Reset password", '<div style="max-width:460px;margin:0 auto"><h1>Check your email</h1>'
+    return page("Reset password", '<div class="u-narrow"><h1>Check your email</h1>'
                 + ui.alert(e(FORGOT_MSG), "info") + '<p><a href="/login">Back to sign in</a></p></div>')
 
 
@@ -4354,7 +4451,7 @@ def forgot(request: Request, email: str = Form("")):
 def reset_form(request: Request, token: str, err: str = ""):
     r = ACC.get_reset(token)
     if not r:
-        return page("Reset password", '<div style="max-width:460px;margin:0 auto">' + ui.alert(
+        return page("Reset password", '<div class="u-narrow">' + ui.alert(
             "This reset link is not valid any more. Ask for a new one.", "bad") + '<p><a href="/forgot">Reset password</a></p></div>')
     return page("Reset password", auth_form(f"New password for {e(r['email'])}", "Choose a new password.",
                                             [("password", f"New password (at least {ACC.MIN_PASSWORD} characters)", "password", "", True, "new-password"),
@@ -4665,7 +4762,7 @@ def bulk_submit(request: Request, brand_id: int = Form(...), language: str = For
         return err_page(u, "None of the files could be accepted. " + " ".join(skipped))
     bid = JOBS.create_batch(brand_id, u["id"], items, language if language in ("auto", "mr", "hi", "en") else "auto", hint)
     log(None, u["name"], "BATCH_STARTED", f"Batch {bid}: {len(items)} file(s) queued", brand_id)
-    request.session["flash"] = (f"{len(items)} video(s) queued." + (f" Skipped: {' '.join(skipped)}" if skipped else ""))[:400]
+    request.session["flash"] = (f"{count_of(len(items), 'video')} queued." + (f" Skipped: {' '.join(skipped)}" if skipped else ""))[:400]
     return RedirectResponse(f"/bulk/{bid}", 303)
 
 
@@ -4907,11 +5004,11 @@ def learned_page(request: Request):
         state = ui.badge("Active", "ok", "check-circle") if c["active"] else ui.badge("Off", "neutral", "clock")
         cue = "any context" if c["scope"] == "phrase" else (c["cue"] or "-")
         note = f'<div class="muted">{e(c["pending_reason"])}</div>' if c["pending_reason"] else ""
-        tog = (f'<form method="post" action="/admin/learned/toggle" style="display:inline">'
+        tog = (f'<form class="u-inline" method="post" action="/admin/learned/toggle">'
                f'<input type="hidden" name="lesson_id" value="{c["id"]}">'
                f'<input type="hidden" name="on" value="{0 if c["active"] else 1}">'
                f'<button class="btn secondary sm" type="submit">{"Switch off" if c["active"] else "Switch on"}</button></form>')
-        scope = (f'<form method="post" action="/admin/learned/scope" style="display:inline">'
+        scope = (f'<form class="u-inline" method="post" action="/admin/learned/scope">'
                  f'<input type="hidden" name="lesson_id" value="{c["id"]}">'
                  f'<input type="hidden" name="scope" value="{"context" if c["scope"] == "phrase" else "phrase"}">'
                  f'<button class="btn secondary sm" type="submit">{"Only in this context" if c["scope"] == "phrase" else "Allow anywhere"}</button></form>')
@@ -5248,11 +5345,11 @@ def guide_form(request: Request, err: str = ""):
                "Ready to move: No\nBooking amount: 6 lakh\nOther names: Lakeview; Lake View\n"
                "2 BHK Apartment: Price 1.05 Cr; Carpet 640 sq ft; Built-up 790 sq ft; Bathrooms 2; Balconies 2; Parking 1")
     help_ = ('<p class="muted">BrandGuard reads two kinds of content, then shows you everything it found before anything is saved.</p>'
-             '<p style="margin-bottom:4px"><b>1. Rules</b> <span class="muted">(a heading, then one item per line)</span></p>'
+             '<p class="u-mb4"><b>1. Rules</b> <span class="muted">(a heading, then one item per line)</span></p>'
              "<ul style='margin:0 0 12px;padding-left:20px'>" + items_html + "</ul>"
-             '<p style="margin-bottom:4px"><b>2. Projects, prices and facts</b> <span class="muted">(one property type per line)</span></p>'
-             f'<pre class="mono" style="white-space:pre-wrap;background:#f7f9fc;border:1px solid var(--line);border-radius:7px;padding:12px;margin:0 0 8px">{e(example)}</pre>'
-             '<p class="muted" style="margin:0">Keep each property type on one line, not in a table. Property types can be Apartment, '
+             '<p class="u-mb4"><b>2. Projects, prices and facts</b> <span class="muted">(one property type per line)</span></p>'
+             f'<pre class="mono example-pre">{e(example)}</pre>'
+             '<p class="muted u-m0">Keep each property type on one line, not in a table. Property types can be Apartment, '
              'Penthouse, Villa, Bungalow, Row house or Plot. Scanned images are not supported. A new project is not visible to '
              'any partner until you grant access on the Project Access page.</p>')
     form = ('<form method="post" action="/admin/guide/preview" enctype="multipart/form-data" data-lock>'
@@ -5327,13 +5424,13 @@ def guide_preview(request: Request, file: UploadFile = File(...)):
             warn = ui.alert("<b>Not understood, so skipped:</b><ul style='margin:6px 0 0;padding-left:18px'>" + lines_ + "</ul>", "warn")
         pick = (f'<label class="check"><input type="checkbox" name="proj" value="{i}" checked> '
                 f'<b>Add this project and its prices</b></label>')
-        cards.append(ui.card(p["name"], f'<p>{state}</p>{pick}<dl class="kv" style="margin:10px 0 14px">{dl}</dl>{tbl}{warn}',
+        cards.append(ui.card(p["name"], f'<p>{state}</p>{pick}<dl class="kv u-m10-14">{dl}</dl>{tbl}{warn}',
                              "Check that each price reads as the amount you expect (lakh versus crore)."))
     payload = e(json.dumps(projects, ensure_ascii=False))
     form = (f'<form method="post" action="/admin/guide/apply" data-lock><input type="hidden" name="title" value="{e(name)}">'
             f'<input type="hidden" name="payload" value="{payload}">'
             + "".join(cards)
-            + f'<div class="form-actions" style="margin-top:16px"><button class="btn" type="submit">{ui.icon("check", 16)}Save selected</button>'
+            + f'<div class="form-actions u-mt16"><button class="btn" type="submit">{ui.icon("check", 16)}Save selected</button>'
               '<a class="btn secondary" href="/admin/guide">Cancel</a></div></form>')
     body = (ui.page_header("Check what was found", f"From {e(name)}. Untick anything that should not be saved.")
             + '<div class="stack">' + ui.alert("Nothing is saved yet. Rules and prices apply to new submissions only. "
@@ -5537,21 +5634,20 @@ def test_audio_page(request: Request):
         if f:
             src = f'/test-audio/file/{c["key"]}?inline=1'
             if f.suffix.lower() in VIDEO_EXT:
-                player = (f'<video controls preload="none" playsinline style="width:100%;max-height:360px;margin:8px 0 12px;'
-                          f'background:#000;border-radius:8px" src="{src}">Your browser cannot play video.</video>')
+                player = (f'<video controls preload="none" playsinline class="media-player" src="{src}">Your browser cannot play video.</video>')
             else:
-                player = (f'<audio controls preload="none" style="width:100%;margin:8px 0 12px" src="{src}">'
+                player = (f'<audio controls preload="none" class="media-player" src="{src}">'
                           f'Your browser cannot play audio.</audio>')
             media = player + (f'<a class="btn" href="/test-audio/file/{c["key"]}" download>{ui.icon("upload", 16)}'
                               f'Download demo file {c["n"]}</a>')
         else:
             media = ui.alert("This demo file has not been added yet.", "warn")
         steps = "".join(f"<li>{e(s)}</li>" for s in c["steps"])
-        said = (f'<p class="muted" style="margin-bottom:4px">What is said in the clip</p>'
-                f'<p style="margin-top:0"><i>"{e(c["say"])}"</i></p>') if c["say"] else ""
+        said = (f'<p class="muted u-mb4">What is said in the clip</p>'
+                f'<p class="u-mt0"><i>"{e(c["say"])}"</i></p>') if c["say"] else ""
         inner = (said + media
-                 + f'<h3 class="sec-title">What to do</h3><ol style="margin:0 0 12px;padding-left:20px">{steps}</ol>'
-                 f'<h3 class="sec-title">What you should see</h3><p style="margin:0">{e(c["result"])}</p>')
+                 + f'<h3 class="sec-title">What to do</h3><ol class="u-list u-mb12">{steps}</ol>'
+                 f'<h3 class="sec-title">What you should see</h3><p class="u-m0">{e(c["result"])}</p>')
         cards.append(ui.card(f'Demo file {c["n"]}: {c["title"]}', inner, cls=""))
     guide = AUDIO_DIR / "Demo_Developer_Brand_Guide.pdf"
     extra = ""

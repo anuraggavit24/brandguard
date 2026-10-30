@@ -102,6 +102,7 @@ def risk_radar_svg(risk, size=220):
     dims = risk.get("dimensions") or {}
     keys = ["claims", "tone", "facts", "visual", "a11y", "confidentiality"]
     n = len(keys)
+    pad = 60  # room for the side labels, which are wider than the chart
     cx = cy = size / 2
     r_max = size * 0.34
     angles = [(-math.pi / 2) + (2 * math.pi * i / n) for i in range(n)]
@@ -135,18 +136,17 @@ def risk_radar_svg(risk, size=220):
         f"{pt(i, (dims.get(k, {}).get('score', 0) or 0) / 100.0)[1]:.1f}"
         for i, k in enumerate(keys))
     band = risk.get("band", "LOW")
-    fill = {"LOW": "#136c3a33", "MEDIUM": "#8a530033", "HIGH": "#a61b1b33", "CRITICAL": "#a61b1b55"}.get(band, "#1d5fd133")
-    stroke = {"LOW": "#136c3a", "MEDIUM": "#8a5300", "HIGH": "#a61b1b", "CRITICAL": "#7a1010"}.get(band, "#1d5fd1")
+    band_cls = {"LOW": "low", "MEDIUM": "med", "HIGH": "high", "CRITICAL": "crit"}.get(band, "low")
 
     return (
-        f'<svg class="radar-svg" viewBox="0 0 {size} {size}" width="{size}" height="{size}" '
+        f'<svg class="radar-svg radar-{band_cls}" viewBox="{-pad} 0 {size + 2 * pad} {size}" width="{size + 2 * pad}" height="{size}" '
         f'role="img" aria-label="Brand risk radar score {risk.get("score", 0)} out of 100, {band} band">'
-        f'<rect width="{size}" height="{size}" fill="transparent"/>'
+        f'<rect x="{-pad}" width="{size + 2 * pad}" height="{size}" fill="transparent"/>'
         + "".join(rings) + "".join(axes)
-        + f'<polygon points="{data_pts}" fill="{fill}" stroke="{stroke}" stroke-width="2.5"/>'
+        + f'<polygon points="{data_pts}" class="radar-data"/>'
         + "".join(
             f'<circle cx="{pt(i, (dims.get(k, {}).get("score", 0) or 0) / 100.0)[0]:.1f}" '
-            f'cy="{pt(i, (dims.get(k, {}).get("score", 0) or 0) / 100.0)[1]:.1f}" r="3.5" fill="{stroke}"/>'
+            f'cy="{pt(i, (dims.get(k, {}).get("score", 0) or 0) / 100.0)[1]:.1f}" r="3.5" class="radar-dot"/>'
             for i, k in enumerate(keys))
         + "".join(labels)
         + "</svg>"
@@ -159,8 +159,11 @@ def risk_radar_html(rep, icon_fn=None):
     score, band = risk["score"], risk["band"]
     tone = {"LOW": "ok", "MEDIUM": "warn", "HIGH": "bad", "CRITICAL": "bad"}.get(band, "neutral")
     svg = risk_radar_svg(risk)
-    dim_rows = []
+    dim_rows, clear_labels = [], []
     for key, d in risk["dimensions"].items():
+        if not d["count"] and d["score"] < 20:
+            clear_labels.append(e(d["label"]))
+            continue
         cites = "".join(
             f'<li><span class="mono">{e(c["evidence"] or c["type"])}</span>'
             f'<span class="muted"> — {e(c["why"] or c["type"])}</span></li>'
@@ -181,7 +184,9 @@ def risk_radar_html(rep, icon_fn=None):
         f'<div><b>Brand Risk · {e(band)}</b>'
         f'<p class="muted" style="margin:4px 0 0">0 = publish-ready · 100 = blocked. '
         f'Each spoke cites concrete findings — not a black-box score.</p></div></div>'
-        f'<div class="radar-grid">{svg}<div class="radar-dims">{"".join(dim_rows)}</div></div></div>'
+        f'<div class="radar-grid">{svg}<div class="radar-dims">{"".join(dim_rows)}'
+        + (f'<p class="muted">No findings in: {", ".join(clear_labels)}.</p>' if clear_labels else "")
+        + '</div></div></div>'
     ), risk
 
 
